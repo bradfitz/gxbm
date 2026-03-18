@@ -782,6 +782,13 @@ func (c *Corpus) SetGitHubLimiter(l *rate.Limiter) {
 // watch and append to the mutation log. Only valid in leader mode.
 // The token is the auth token to use to make API calls.
 func (c *Corpus) TrackGitHub(owner, repo, token string) {
+	c.TrackGitHubWithTokenSource(owner, repo, oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token}))
+}
+
+// TrackGitHubWithTokenSource registers the named GitHub repo as a repo to
+// watch and append to the mutation log. Only valid in leader mode.
+// The tokenSource is used to obtain auth tokens for GitHub API calls.
+func (c *Corpus) TrackGitHubWithTokenSource(owner, repo string, tokenSource oauth2.TokenSource) {
 	if c.mutationLogger == nil {
 		panic("can't TrackGitHub in non-leader mode")
 	}
@@ -794,14 +801,14 @@ func (c *Corpus) TrackGitHub(owner, repo, token string) {
 		log.Fatalf("invalid github owner/repo %q/%q", owner, repo)
 	}
 	c.watchedGithubRepos = append(c.watchedGithubRepos, watchedGithubRepo{
-		gr:    gr,
-		token: token,
+		gr:          gr,
+		tokenSource: tokenSource,
 	})
 }
 
 type watchedGithubRepo struct {
-	gr    *GitHubRepo
-	token string
+	gr          *GitHubRepo
+	tokenSource oauth2.TokenSource
 }
 
 // g.c.mu must be held
@@ -1450,9 +1457,8 @@ func (c *githubCache) Set(urlKey string, res []byte) {
 // sync checks for new changes on a single GitHub repository and
 // updates the Corpus with any changes. If loop is true, it runs
 // forever.
-func (gr *GitHubRepo) sync(ctx context.Context, token string, loop bool) error {
-	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
-	hc := oauth2.NewClient(ctx, ts)
+func (gr *GitHubRepo) sync(ctx context.Context, tokenSource oauth2.TokenSource, loop bool) error {
+	hc := oauth2.NewClient(ctx, tokenSource)
 	if tr, ok := hc.Transport.(*http.Transport); ok {
 		defer tr.CloseIdleConnections()
 	}
@@ -1468,7 +1474,7 @@ func (gr *GitHubRepo) sync(ctx context.Context, token string, loop bool) error {
 
 	p := &githubRepoPoller{
 		c:             gr.github.c,
-		token:         token,
+		tokenSource:   tokenSource,
 		gr:            gr,
 		githubDirect:  github.NewClient(&http.Client{Transport: directTransport}),
 		githubCaching: github.NewClient(&http.Client{Transport: cachingTransport}),
@@ -1529,7 +1535,7 @@ type httpClient interface {
 type githubRepoPoller struct {
 	c             *Corpus // shortcut for gr.github.c
 	gr            *GitHubRepo
-	token         string
+	tokenSource   oauth2.TokenSource
 	lastUpdate    time.Time // modified by sync
 	githubCaching *github.Client
 	githubDirect  *github.Client // not caching
@@ -2048,7 +2054,11 @@ func (p *githubRepoPoller) syncEventsOnIssue(ctx context.Context, issueNum int32
 				p.Owner(), p.Repo(), issueNum, perPage, page)
 			req, _ := http.NewRequest("GET", u, nil)
 
-			req.Header.Set("Authorization", "Bearer "+p.token)
+			tok, err := p.tokenSource.Token()
+			if err != nil {
+				return nil, nil, fmt.Errorf("getting token: %v", err)
+			}
+			req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
 			req.Header.Set("User-Agent", "golang-x-build-maintner/1.0")
 			ctx, cancel := context.WithTimeout(ctx, time.Minute)
 			defer cancel()
@@ -2292,7 +2302,11 @@ func (p *githubRepoPoller) syncReviewsOnPullRequest(ctx context.Context, issueNu
 				p.Owner(), p.Repo(), issueNum, perPage, page)
 			req, _ := http.NewRequest("GET", u, nil)
 
-			req.Header.Set("Authorization", "Bearer "+p.token)
+			tok, err := p.tokenSource.Token()
+			if err != nil {
+				return nil, nil, fmt.Errorf("getting token: %v", err)
+			}
+			req.Header.Set("Authorization", "Bearer "+tok.AccessToken)
 			req.Header.Set("User-Agent", "golang-x-build-maintner/1.0")
 			ctx, cancel := context.WithTimeout(ctx, time.Minute)
 			defer cancel()

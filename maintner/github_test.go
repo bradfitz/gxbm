@@ -21,6 +21,7 @@ import (
 
 	"github.com/google/go-github/v74/github"
 	"golang.org/x/build/maintner/maintpb"
+	"golang.org/x/oauth2"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -669,7 +670,7 @@ func TestSyncEvents(t *testing.T) {
 	defer server.Close()
 	p := &githubRepoPoller{
 		c:             &c,
-		token:         "foobar",
+		tokenSource:   oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "foobar"}),
 		gr:            gr,
 		githubDirect:  github.NewClient(server.Client()),
 		githubCaching: github.NewClient(server.Client()),
@@ -745,7 +746,7 @@ func TestSyncMultipleConsecutiveEvents(t *testing.T) {
 	defer server.Close()
 	p := &githubRepoPoller{
 		c:             &c,
-		token:         "foobar",
+		tokenSource:   oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "foobar"}),
 		gr:            gr,
 		githubDirect:  github.NewClient(server.Client()),
 		githubCaching: github.NewClient(server.Client()),

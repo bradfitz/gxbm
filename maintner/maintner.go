@@ -371,11 +371,11 @@ func (c *Corpus) sync(ctx context.Context, loop bool) error {
 
 	group, ctx := errgroup.WithContext(ctx)
 	for _, w := range c.watchedGithubRepos {
-		gr, token := w.gr, w.token
+		gr, ts := w.gr, w.tokenSource
 		group.Go(func() error {
 			log.Printf("Polling %v ...", gr.id)
 			for {
-				err := gr.sync(ctx, token, loop)
+				err := gr.sync(ctx, ts, loop)
 				if loop && isTempErr(err) {
 					log.Printf("Temporary error from github %v: %v", gr.ID(), err)
 					time.Sleep(30 * time.Second)

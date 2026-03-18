@@ -7,6 +7,7 @@ package maintner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -1204,27 +1205,6 @@ func (r *GitHubRepo) newMutationFromIssue(a *GitHubIssue, b *github.Issue) *main
 	return &maintpb.Mutation{GithubIssue: gim}
 }
 
-func (r *GitHubRepo) missingIssues() []int32 {
-	c := r.github.c
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	var maxNum int32
-	for num := range r.issues {
-		if num > maxNum {
-			maxNum = num
-		}
-	}
-
-	var missing []int32
-	for num := int32(1); num < maxNum; num++ {
-		if _, ok := r.issues[num]; !ok {
-			missing = append(missing, num)
-		}
-	}
-	return missing
-}
-
 // processGithubMutation updates the corpus with the information in m.
 func (c *Corpus) processGithubMutation(m *maintpb.GithubMutation) {
 	if c == nil {
@@ -1791,17 +1771,8 @@ func (p *githubRepoPoller) syncIssues(ctx context.Context, expectChanges bool) e
 		}
 
 		if changes == 0 {
-			missing := p.gr.missingIssues()
-			if len(missing) == 0 {
-				p.logf("no changed issues; cached=%v", fromCache)
-				return nil
-			}
-			if len(missing) > 0 {
-				p.logf("%d missing github issues.", len(missing))
-			}
-			if len(missing) < 100 {
-				keepGoing = false
-			}
+			p.logf("no changed issues; cached=%v", fromCache)
+			return nil
 		}
 
 		p.c.mu.RLock()
@@ -1811,45 +1782,6 @@ func (p *githubRepoPoller) syncIssues(ctx context.Context, expectChanges bool) e
 
 		page++
 		after = res.After
-	}
-
-	missing := p.gr.missingIssues()
-	if len(missing) > 0 {
-		p.logf("remaining issues: %v", missing)
-		for _, num := range missing {
-			p.logf("getting issue %v ...", num)
-			var issue *github.Issue
-			var err error
-			for {
-				issue, _, err = p.githubDirect.Issues.Get(ctx, owner, repo, int(num))
-				if canRetry(ctx, err) {
-					continue
-				}
-				break
-			}
-			if ge, ok := err.(*github.ErrorResponse); ok && (ge.Response.StatusCode == http.StatusNotFound || ge.Response.StatusCode == http.StatusGone) {
-				mut := &maintpb.Mutation{
-					GithubIssue: &maintpb.GithubIssueMutation{
-						Owner:    owner,
-						Repo:     repo,
-						Number:   num,
-						NotExist: true,
-					},
-				}
-				p.logf("issue %d is gone, marking as NotExist", num)
-				p.c.addMutation(mut)
-				continue
-			} else if err != nil {
-				return err
-			}
-			mp := p.gr.newMutationFromIssue(nil, issue)
-			if mp == nil {
-				continue
-			}
-			p.logf("modified issue %d: %s", issue.GetNumber(), issue.GetTitle())
-			p.c.addMutation(mp)
-			p.lastUpdate = time.Now()
-		}
 	}
 
 	return nil
@@ -1910,7 +1842,7 @@ func (p *githubRepoPoller) syncCommentsOnIssue(ctx context.Context, issueNum int
 		ics, res, err := p.githubDirect.Issues.ListComments(ctx, owner, repo, int(issueNum), opt)
 		if canRetry(ctx, err) {
 			continue
-		} else if ge, ok := err.(*github.ErrorResponse); ok && (ge.Response.StatusCode == http.StatusNotFound || ge.Response.StatusCode == http.StatusGone) {
+		} else if isIssueGoneError(err) {
 			mut := &maintpb.Mutation{
 				GithubIssue: &maintpb.GithubIssueMutation{
 					Owner:    owner,
@@ -2019,6 +1951,16 @@ func (p *githubRepoPoller) syncEvents(ctx context.Context) error {
 		for _, num := range nums {
 			p.logf("event sync: %d issues remaining; syncing issue %v", remain, num)
 			if err := p.syncEventsOnIssue(ctx, num); err != nil {
+				if isIssueGoneError(err) {
+					p.logf("issue %d events are gone, marking as NotExist", num)
+					p.c.addMutation(&maintpb.Mutation{
+						GithubIssue: &maintpb.GithubIssueMutation{
+							Owner: p.Owner(), Repo: p.Repo(), Number: num, NotExist: true,
+						},
+					})
+					remain--
+					continue
+				}
 				p.logf("event sync on issue %d: %v", num, err)
 				return err
 			}
@@ -2260,6 +2202,16 @@ func (p *githubRepoPoller) syncReviews(ctx context.Context) error {
 		for _, num := range nums {
 			p.logf("reviews sync: %d issues remaining; syncing issue %v", remain, num)
 			if err := p.syncReviewsOnPullRequest(ctx, num); err != nil {
+				if isIssueGoneError(err) {
+					p.logf("issue %d reviews are gone, marking as NotExist", num)
+					p.c.addMutation(&maintpb.Mutation{
+						GithubIssue: &maintpb.GithubIssueMutation{
+							Owner: p.Owner(), Repo: p.Repo(), Number: num, NotExist: true,
+						},
+					})
+					remain--
+					continue
+				}
 				p.logf("review sync on issue %d: %v", num, err)
 				return err
 			}
@@ -2596,6 +2548,23 @@ func (t limitTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		}
 	}
 	return t.base.RoundTrip(r)
+}
+
+// isIssueGoneError reports whether err from a GitHub API call indicates the
+// issue no longer exists in this repo. This covers HTTP 404 (Not Found),
+// 410 (Gone), and 301 (Moved Permanently, used for transferred issues).
+// The error may be a *github.ErrorResponse or a *github.RedirectionError.
+func isIssueGoneError(err error) bool {
+	if ge, ok := err.(*github.ErrorResponse); ok {
+		return ge.Response.StatusCode == http.StatusNotFound ||
+			ge.Response.StatusCode == http.StatusGone ||
+			ge.Response.StatusCode == http.StatusMovedPermanently
+	}
+	var re *github.RedirectionError
+	if errors.As(err, &re) {
+		return re.StatusCode == http.StatusMovedPermanently
+	}
+	return false
 }
 
 // canRetry reports whether ctx hasn't been canceled and err is a non-nil retryable error.

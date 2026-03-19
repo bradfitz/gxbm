@@ -1,3 +1,0 @@
-export GOROOT_BOOTSTRAP=$HOME/go-android-arm64-bootstrap
-export PATH=$HOME/go/bin:$PATH
-export TMPDIR=$HOME/tmpdir

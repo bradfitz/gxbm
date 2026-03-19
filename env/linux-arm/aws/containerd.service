@@ -1,5 +1,0 @@
-# overwrite containerd.service
-# /etc/systemd/system/containerd.service.d/override.conf
-[Service]
-ExecStart=
-ExecStart=/usr/bin/setarch linux32 -B /usr/bin/containerd

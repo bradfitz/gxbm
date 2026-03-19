@@ -1,3 +1,0 @@
-termux-wake-lock
-sshd
-tmux new-session -d /data/data/com.termux/files/home/builder.sh

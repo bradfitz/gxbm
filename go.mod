@@ -1,4 +1,4 @@
-module golang.org/x/build
+module github.com/bradfitz/gxbm
 
 go 1.25.0
 

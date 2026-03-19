@@ -21,9 +21,9 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/build/internal/envutil"
-	"golang.org/x/build/internal/foreach"
-	"golang.org/x/build/maintner/maintpb"
+	"github.com/bradfitz/gxbm/internal/envutil"
+	"github.com/bradfitz/gxbm/internal/foreach"
+	"github.com/bradfitz/gxbm/maintner/maintpb"
 	"google.golang.org/protobuf/proto"
 )
 

@@ -27,8 +27,8 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/build/internal/envutil"
-	"golang.org/x/build/maintner/maintpb"
+	"github.com/bradfitz/gxbm/internal/envutil"
+	"github.com/bradfitz/gxbm/maintner/maintpb"
 )
 
 // Gerrit holds information about a number of Gerrit projects.

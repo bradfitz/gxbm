@@ -17,9 +17,9 @@ import (
 	"time"
 
 	"cloud.google.com/go/compute/metadata"
-	"golang.org/x/build/gerrit"
-	"golang.org/x/build/internal/secret"
-	"golang.org/x/build/maintner"
+	"github.com/bradfitz/gxbm/gerrit"
+	"github.com/bradfitz/gxbm/internal/secret"
+	"github.com/bradfitz/gxbm/maintner"
 )
 
 func BenchmarkGet(b *testing.B) {

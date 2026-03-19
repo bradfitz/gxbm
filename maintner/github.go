@@ -22,9 +22,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bradfitz/gxbm/maintner/maintpb"
 	"github.com/google/go-github/v74/github"
 	"github.com/gregjones/httpcache"
-	"golang.org/x/build/maintner/maintpb"
 	"golang.org/x/oauth2"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/time/rate"
@@ -1009,7 +1009,7 @@ func (d githubIssueDiffer) Diff() *maintpb.GithubIssueMutation {
 	for _, f := range issueDiffMethods {
 		if f(d, m) {
 			if d.gr.verbose() {
-				fname := strings.TrimPrefix(runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name(), "golang.org/x/build/maintner.githubIssueDiffer.")
+				fname := strings.TrimPrefix(runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name(), "github.com/bradfitz/gxbm/maintner.githubIssueDiffer.")
 				log.Printf("Issue %d changed: %v", d.b.GetNumber(), fname)
 			}
 			changed = true

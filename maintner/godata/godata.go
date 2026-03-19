@@ -16,7 +16,7 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"golang.org/x/build/maintner"
+	"github.com/bradfitz/gxbm/maintner"
 )
 
 // Server is the Go project's production maintner log.
@@ -43,7 +43,7 @@ const Server = "https://maintner.golang.org/logs"
 // The in-memory representation is about 25% larger than its on-disk
 // size. In April 2022, it's under 4 GB.
 //
-// See https://pkg.go.dev/golang.org/x/build/maintner#Corpus for how
+// See https://pkg.go.dev/github.com/bradfitz/gxbm/maintner#Corpus for how
 // to walk the data structure.
 func Get(ctx context.Context) (*maintner.Corpus, error) {
 	targetDir := Dir()

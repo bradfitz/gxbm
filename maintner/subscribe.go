@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/build/cmd/pubsubhelper/pubsubtypes"
+	"github.com/bradfitz/gxbm/cmd/pubsubhelper/pubsubtypes"
 )
 
 func (c *Corpus) activityChan(topic string) chan struct{} {

@@ -17,11 +17,11 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/build/gerrit"
-	"golang.org/x/build/maintner"
-	"golang.org/x/build/maintner/maintnerd/apipb"
-	"golang.org/x/build/maintner/maintnerd/maintapi/version"
-	"golang.org/x/build/repos"
+	"github.com/bradfitz/gxbm/gerrit"
+	"github.com/bradfitz/gxbm/maintner"
+	"github.com/bradfitz/gxbm/maintner/maintnerd/apipb"
+	"github.com/bradfitz/gxbm/maintner/maintnerd/maintapi/version"
+	"github.com/bradfitz/gxbm/repos"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 )

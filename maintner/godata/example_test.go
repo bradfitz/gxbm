@@ -9,8 +9,8 @@ import (
 	"fmt"
 	"log"
 
-	"golang.org/x/build/maintner"
-	"golang.org/x/build/maintner/godata"
+	"github.com/bradfitz/gxbm/maintner"
+	"github.com/bradfitz/gxbm/maintner/godata"
 )
 
 func ExampleGet_numComments() {

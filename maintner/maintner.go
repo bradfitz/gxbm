@@ -20,7 +20,7 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/build/maintner/maintpb"
+	"github.com/bradfitz/gxbm/maintner/maintpb"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/time/rate"
 )
@@ -43,22 +43,22 @@ type Corpus struct {
 	activityChans map[string]chan struct{} // keyed by topic
 
 	// github-specific
-	github             *GitHub
-	gerrit             *Gerrit
-	watchedGithubRepos []watchedGithubRepo
-	watchedGerritRepos []watchedGerritRepo
+	github              *GitHub
+	gerrit              *Gerrit
+	watchedGithubRepos  []watchedGithubRepo
+	watchedGerritRepos  []watchedGerritRepo
 	githubLimiter       *rate.Limiter
 	githubBaseTransport http.RoundTripper
 
 	// git-specific:
-	lastGitCount         time.Time // last time of log spam about loading status
-	pollGitDirs          []polledGitCommits
+	lastGitCount          time.Time // last time of log spam about loading status
+	pollGitDirs           []polledGitCommits
 	watchedGitRepoConfigs []watchedGitRepoState
-	gitPeople            map[string]*GitPerson
-	gitCommit            map[GitHash]*GitCommit
-	gitCommitTodo        map[GitHash]bool          // -> true
-	gitOfHg              map[string]GitHash        // hg hex hash -> git hash
-	zoneCache            map[string]*time.Location // "+0530" => location
+	gitPeople             map[string]*GitPerson
+	gitCommit             map[GitHash]*GitCommit
+	gitCommitTodo         map[GitHash]bool          // -> true
+	gitOfHg               map[string]GitHash        // hg hex hash -> git hash
+	zoneCache             map[string]*time.Location // "+0530" => location
 }
 
 // RLock grabs the corpus's read lock. Grabbing the read lock prevents

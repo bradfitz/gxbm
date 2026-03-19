@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"golang.org/x/build/internal/foreach"
+	"github.com/bradfitz/gxbm/internal/foreach"
 )
 
 func ExampleLine() {

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/build/maintner/maintpb"
+	"github.com/bradfitz/gxbm/maintner/maintpb"
 )
 
 func TestGCSLogWakeup_Timeout(t *testing.T) {

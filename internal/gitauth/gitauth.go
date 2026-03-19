@@ -18,7 +18,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/compute/metadata"
-	"golang.org/x/build/internal/secret"
+	"github.com/bradfitz/gxbm/internal/secret"
 )
 
 func Init() error {

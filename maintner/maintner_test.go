@@ -15,7 +15,7 @@ import (
 
 	"github.com/davecgh/go-spew/spew"
 	"github.com/google/go-github/v74/github"
-	"golang.org/x/build/maintner/maintpb"
+	"github.com/bradfitz/gxbm/maintner/maintpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 

@@ -18,7 +18,7 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/build/maintner/maintnerd/apipb"
+	"github.com/bradfitz/gxbm/maintner/maintnerd/apipb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/protobuf/encoding/prototext"

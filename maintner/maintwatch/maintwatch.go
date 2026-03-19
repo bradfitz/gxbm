@@ -12,8 +12,8 @@ import (
 	"log"
 	"time"
 
-	"golang.org/x/build/maintner"
-	"golang.org/x/build/maintner/godata"
+	"github.com/bradfitz/gxbm/maintner"
+	"github.com/bradfitz/gxbm/maintner/godata"
 	"google.golang.org/protobuf/encoding/prototext"
 )
 

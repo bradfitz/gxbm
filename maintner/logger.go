@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/build/maintner/maintpb"
-	"golang.org/x/build/maintner/reclog"
+	"github.com/bradfitz/gxbm/maintner/maintpb"
+	"github.com/bradfitz/gxbm/maintner/reclog"
 	"google.golang.org/protobuf/proto"
 )
 

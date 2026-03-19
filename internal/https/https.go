@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file.
 
 // Package https contains helpers for starting an HTTP/HTTPS server.
-package https // import "golang.org/x/build/internal/https"
+package https // import "github.com/bradfitz/gxbm/internal/https"
 
 import (
 	"context"
@@ -23,8 +23,8 @@ import (
 	"time"
 
 	"cloud.google.com/go/storage"
-	"golang.org/x/build/autocertcache"
-	"golang.org/x/build/internal/secret"
+	"github.com/bradfitz/gxbm/autocertcache"
+	"github.com/bradfitz/gxbm/internal/secret"
 	"golang.org/x/crypto/acme"
 	"golang.org/x/crypto/acme/autocert"
 )

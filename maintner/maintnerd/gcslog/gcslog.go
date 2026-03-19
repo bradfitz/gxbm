@@ -24,9 +24,9 @@ import (
 	"time"
 
 	"cloud.google.com/go/storage"
-	"golang.org/x/build/maintner"
-	"golang.org/x/build/maintner/maintpb"
-	"golang.org/x/build/maintner/reclog"
+	"github.com/bradfitz/gxbm/maintner"
+	"github.com/bradfitz/gxbm/maintner/maintpb"
+	"github.com/bradfitz/gxbm/maintner/reclog"
 	"google.golang.org/api/iterator"
 	"google.golang.org/protobuf/proto"
 )

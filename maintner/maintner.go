@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"regexp"
 	"sync"
 	"time"
@@ -46,16 +47,18 @@ type Corpus struct {
 	gerrit             *Gerrit
 	watchedGithubRepos []watchedGithubRepo
 	watchedGerritRepos []watchedGerritRepo
-	githubLimiter      *rate.Limiter
+	githubLimiter       *rate.Limiter
+	githubBaseTransport http.RoundTripper
 
 	// git-specific:
-	lastGitCount  time.Time // last time of log spam about loading status
-	pollGitDirs   []polledGitCommits
-	gitPeople     map[string]*GitPerson
-	gitCommit     map[GitHash]*GitCommit
-	gitCommitTodo map[GitHash]bool          // -> true
-	gitOfHg       map[string]GitHash        // hg hex hash -> git hash
-	zoneCache     map[string]*time.Location // "+0530" => location
+	lastGitCount         time.Time // last time of log spam about loading status
+	pollGitDirs          []polledGitCommits
+	watchedGitRepoConfigs []watchedGitRepoState
+	gitPeople            map[string]*GitPerson
+	gitCommit            map[GitHash]*GitCommit
+	gitCommitTodo        map[GitHash]bool          // -> true
+	gitOfHg              map[string]GitHash        // hg hex hash -> git hash
+	zoneCache            map[string]*time.Location // "+0530" => location
 }
 
 // RLock grabs the corpus's read lock. Grabbing the read lock prevents
@@ -179,6 +182,75 @@ func (c *Corpus) TrackGoGitRepo(goRepo, dir string) {
 		repo: &maintpb.GitRepo{GoRepo: goRepo},
 		dir:  dir,
 	})
+}
+
+// WatchedGitRepo configures a git repository to be tracked by the corpus.
+type WatchedGitRepo struct {
+	// Name is a short name like "foo" or "org/repo" (e.g. "tailscale/tailscale").
+	Name string
+	// Remote is the git URL for ls-remote and fetch (e.g. "git://rogitproxy/tailscale/tailscale").
+	Remote string
+	// Refs are exact ref names to watch (e.g. "refs/heads/main").
+	Refs []string
+	// RefRegexps are patterns matched against ref names (e.g. `refs/tags/v1\..*`).
+	RefRegexps []string
+	// PollInterval is how often to run git ls-remote. Default 30s.
+	PollInterval time.Duration
+}
+
+type watchedGitRepoState struct {
+	conf       WatchedGitRepo
+	refRegexps []*regexp.Regexp
+	knownRefs  map[string]GitHash // ref name -> last known hash
+}
+
+func (ws *watchedGitRepoState) matchesRef(refName string) bool {
+	for _, r := range ws.conf.Refs {
+		if r == refName {
+			return true
+		}
+	}
+	for _, re := range ws.refRegexps {
+		if re.MatchString(refName) {
+			return true
+		}
+	}
+	return false
+}
+
+// TrackGitRepo registers a git repository to have its commits tracked.
+// The conf.Name must be non-empty and conf.Remote must be non-empty.
+// At least one of Refs or RefRegexps must be provided.
+func (c *Corpus) TrackGitRepo(conf WatchedGitRepo) {
+	if c.mutationLogger == nil {
+		panic("can't TrackGitRepo in non-leader mode")
+	}
+	if conf.Name == "" {
+		panic("TrackGitRepo: Name is required")
+	}
+	if conf.Remote == "" {
+		panic("TrackGitRepo: Remote is required")
+	}
+	if len(conf.Refs) == 0 && len(conf.RefRegexps) == 0 {
+		panic("TrackGitRepo: at least one of Refs or RefRegexps is required")
+	}
+	if conf.PollInterval == 0 {
+		conf.PollInterval = 30 * time.Second
+	}
+	ws := watchedGitRepoState{
+		conf:      conf,
+		knownRefs: make(map[string]GitHash),
+	}
+	for _, pat := range conf.RefRegexps {
+		re, err := regexp.Compile(pat)
+		if err != nil {
+			panic(fmt.Sprintf("TrackGitRepo: bad RefRegexp %q: %v", pat, err))
+		}
+		ws.refRegexps = append(ws.refRegexps, re)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.watchedGitRepoConfigs = append(c.watchedGitRepoConfigs, ws)
 }
 
 // A MutationSource yields a log of mutations that will catch a corpus
@@ -400,6 +472,22 @@ func (c *Corpus) sync(ctx context.Context, loop bool) error {
 			}
 		})
 	}
+	for i := range c.watchedGitRepoConfigs {
+		ws := &c.watchedGitRepoConfigs[i]
+		group.Go(func() error {
+			log.Printf("Polling git repo %v ...", ws.conf.Name)
+			for {
+				err := c.syncGitRepo(ctx, ws, loop)
+				if loop && isTempErr(err) {
+					log.Printf("Temporary error from git repo %v: %v", ws.conf.Name, err)
+					time.Sleep(30 * time.Second)
+					continue
+				}
+				log.Printf("git repo sync ending for %v: %v", ws.conf.Name, err)
+				return err
+			}
+		})
+	}
 	for _, w := range c.watchedGerritRepos {
 		gp := w.project
 		group.Go(func() error {
@@ -422,4 +510,73 @@ func (c *Corpus) sync(ctx context.Context, loop bool) error {
 func isTempErr(err error) bool {
 	log.Printf("IS TEMP ERROR? %T %v", err, err)
 	return true
+}
+
+// GitRefInfo represents a tracked git ref.
+type GitRefInfo struct {
+	Repo string  // repo name, e.g. "tailscale/tailscale"
+	Ref  string  // ref name, e.g. "refs/heads/main"
+	Hash GitHash // current hash
+}
+
+// ForeachGitCommit calls fn for each git commit in the corpus.
+// Placeholder commits (with no committer) are skipped.
+// If fn returns an error, iteration stops and that error is returned.
+// The caller must hold the read lock if the corpus may be updated concurrently.
+func (c *Corpus) ForeachGitCommit(fn func(*GitCommit) error) error {
+	for _, gc := range c.gitCommit {
+		if gc.Committer == placeholderCommitter {
+			continue
+		}
+		if err := fn(gc); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ForeachGitCommitForRepo calls fn for each git commit in the corpus
+// that belongs to the named repo. Placeholder commits are skipped.
+func (c *Corpus) ForeachGitCommitForRepo(repoName string, fn func(*GitCommit) error) error {
+	for _, gc := range c.gitCommit {
+		if gc.Committer == placeholderCommitter {
+			continue
+		}
+		if gc.Repo != repoName {
+			continue
+		}
+		if err := fn(gc); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ForeachGitRef calls fn for each tracked git ref across all watched repos.
+func (c *Corpus) ForeachGitRef(fn func(GitRefInfo) error) error {
+	for i := range c.watchedGitRepoConfigs {
+		ws := &c.watchedGitRepoConfigs[i]
+		for ref, hash := range ws.knownRefs {
+			if err := fn(GitRefInfo{Repo: ws.conf.Name, Ref: ref, Hash: hash}); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// ForeachGitRepoRef calls fn for each tracked git ref in the named repo.
+func (c *Corpus) ForeachGitRepoRef(repoName string, fn func(GitRefInfo) error) error {
+	for i := range c.watchedGitRepoConfigs {
+		ws := &c.watchedGitRepoConfigs[i]
+		if ws.conf.Name != repoName {
+			continue
+		}
+		for ref, hash := range ws.knownRefs {
+			if err := fn(GitRefInfo{Repo: ws.conf.Name, Ref: ref, Hash: hash}); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

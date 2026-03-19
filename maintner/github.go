@@ -779,6 +779,16 @@ func (c *Corpus) SetGitHubLimiter(l *rate.Limiter) {
 	c.githubLimiter = l
 }
 
+// SetGitHubBaseTransport sets the base HTTP transport used for all GitHub
+// API requests. If non-nil, this transport is used as the foundation of
+// the transport chain (under oauth2, rate limiting, and caching layers).
+// This allows callers to inject custom behavior such as adaptive rate
+// limiting based on response headers. Only valid before Sync or SyncLoop
+// is called.
+func (c *Corpus) SetGitHubBaseTransport(rt http.RoundTripper) {
+	c.githubBaseTransport = rt
+}
+
 // TrackGitHub registers the named GitHub repo as a repo to
 // watch and append to the mutation log. Only valid in leader mode.
 // The token is the auth token to use to make API calls.
@@ -1438,13 +1448,17 @@ func (c *githubCache) Set(urlKey string, res []byte) {
 // updates the Corpus with any changes. If loop is true, it runs
 // forever.
 func (gr *GitHubRepo) sync(ctx context.Context, tokenSource oauth2.TokenSource, loop bool) error {
-	hc := oauth2.NewClient(ctx, tokenSource)
-	if tr, ok := hc.Transport.(*http.Transport); ok {
-		defer tr.CloseIdleConnections()
+	base := gr.github.c.githubBaseTransport
+	if base == nil {
+		base = http.DefaultTransport
 	}
-	directTransport := hc.Transport
+	authTransport := &oauth2.Transport{
+		Source: tokenSource,
+		Base:   base,
+	}
+	directTransport := http.RoundTripper(authTransport)
 	if gr.github.c.githubLimiter != nil {
-		directTransport = limitTransport{gr.github.c.githubLimiter, hc.Transport}
+		directTransport = limitTransport{gr.github.c.githubLimiter, directTransport}
 	}
 	cachingTransport := &httpcache.Transport{
 		Transport:           directTransport,
@@ -1458,7 +1472,7 @@ func (gr *GitHubRepo) sync(ctx context.Context, tokenSource oauth2.TokenSource, 
 		gr:            gr,
 		githubDirect:  github.NewClient(&http.Client{Transport: directTransport}),
 		githubCaching: github.NewClient(&http.Client{Transport: cachingTransport}),
-		client:        http.DefaultClient,
+		client:        &http.Client{Transport: directTransport},
 	}
 	activityCh := gr.github.c.activityChan("github:" + gr.id.String())
 	var expectChanges bool // got webhook update, but haven't seen new data yet

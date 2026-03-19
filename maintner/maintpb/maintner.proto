@@ -242,7 +242,9 @@ message GitRepo {
   // If go_repo is set, it identifies a go.googlesource.com/<go_repo> repo.
   string go_repo = 1;
 
-  // TODO: code.googlesource.com and github repos later.
+  // name is an arbitrary repo name, e.g. "tailscale/tailscale".
+  // If set, go_repo is ignored.
+  string name = 2;
 }
 
 message GitCommit {

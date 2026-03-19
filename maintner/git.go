@@ -12,7 +12,10 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/url"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -77,6 +80,7 @@ type GitCommit struct {
 	Msg        string // Commit message subject and body
 	Files      []*maintpb.GitDiffTreeFile
 	GerritMeta *GerritMeta // non-nil if it's a Gerrit NoteDB meta commit
+	Repo       string      // repo name from GitRepo.Name or GitRepo.GoRepo
 }
 
 func (gc *GitCommit) String() string {
@@ -228,10 +232,10 @@ func (c *Corpus) gitCommitToIndex() GitHash {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	for hash := range c.gitCommitTodo {
-		if _, ok := c.gitCommit[hash]; !ok {
+		gc, ok := c.gitCommit[hash]
+		if !ok || gc.Committer == placeholderCommitter {
 			return hash
 		}
-		log.Printf("Warning: git commit %v in todo map, but already known; ignoring", hash)
 	}
 	return ""
 }
@@ -336,8 +340,17 @@ func (c *Corpus) processGitMutation(m *maintpb.GitMutation) {
 	if commit == nil {
 		return
 	}
-	// TODO: care about m.Repo?
-	c.processGitCommit(commit)
+	gc, err := c.processGitCommit(commit)
+	if err != nil {
+		return
+	}
+	if gc.Repo == "" && m.Repo != nil {
+		if m.Repo.Name != "" {
+			gc.Repo = m.Repo.Name
+		} else if m.Repo.GoRepo != "" {
+			gc.Repo = m.Repo.GoRepo
+		}
+	}
 }
 
 // c.mu is held for writing.
@@ -388,6 +401,9 @@ func (c *Corpus) processGitCommit(commit *maintpb.GitCommit) (*GitCommit, error)
 			parentHash := c.gitHashFromHex(ln[len(parentSpace):])
 			parent := c.gitCommit[parentHash]
 			if parent == nil {
+				// Enqueue for indexing before installing placeholder,
+				// since enqueueCommitLocked skips hashes already in gitCommit.
+				c.enqueueCommitLocked(parentHash)
 				// Install a placeholder to be filled in later.
 				parent = &GitCommit{
 					Hash:      parentHash,
@@ -396,7 +412,6 @@ func (c *Corpus) processGitCommit(commit *maintpb.GitCommit) (*GitCommit, error)
 				c.gitCommit[parentHash] = parent
 			}
 			gc.Parents = append(gc.Parents, parent)
-			c.enqueueCommitLocked(parentHash)
 			return nil
 		}
 		if bytes.HasPrefix(ln, authorSpace) {
@@ -574,4 +589,144 @@ func fromHexChar(c byte) (byte, bool) {
 	}
 
 	return 0, false
+}
+
+// gitScratchDir returns the path for a bare git scratch repo for the given name.
+func gitScratchDir(name string) string {
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		cacheDir = filepath.Join(os.Getenv("HOME"), ".cache")
+	}
+	return filepath.Join(cacheDir, "maintner-git-scratch", url.PathEscape(name))
+}
+
+// syncGitRepo is the outer loop for syncing a watched git repo.
+func (c *Corpus) syncGitRepo(ctx context.Context, ws *watchedGitRepoState, loop bool) error {
+	dir := gitScratchDir(ws.conf.Name)
+
+	// Init bare repo if needed.
+	if _, err := os.Stat(filepath.Join(dir, "HEAD")); os.IsNotExist(err) {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("creating scratch dir: %w", err)
+		}
+		cmd := exec.CommandContext(ctx, "git", "init", "--bare", dir)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("git init --bare %s: %v\n%s", dir, err, out)
+		}
+		log.Printf("Created bare scratch repo at %s", dir)
+	}
+
+	for {
+		if err := c.syncGitRepoOnce(ctx, ws, dir); err != nil {
+			return err
+		}
+		if !loop {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(ws.conf.PollInterval):
+		}
+	}
+}
+
+// syncGitRepoOnce performs a single poll cycle for a watched git repo.
+func (c *Corpus) syncGitRepoOnce(ctx context.Context, ws *watchedGitRepoState, dir string) error {
+	// 1. ls-remote to discover refs
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", ws.conf.Remote)
+	out, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("git ls-remote %s: %w", ws.conf.Remote, err)
+	}
+
+	// 2. Parse and filter refs
+	type refUpdate struct {
+		name string
+		hash string // 40-char hex
+	}
+	var updates []refUpdate
+
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		hash, refName := fields[0], fields[1]
+		if len(hash) != 40 {
+			continue
+		}
+		if !ws.matchesRef(refName) {
+			continue
+		}
+
+		// 3. Compare against known refs
+		c.mu.RLock()
+		knownHash := ws.knownRefs[refName]
+		c.mu.RUnlock()
+
+		newHash := GitHash(mustDecodeHex(hash))
+		if knownHash == newHash {
+			continue
+		}
+		updates = append(updates, refUpdate{name: refName, hash: hash})
+	}
+
+	if len(updates) == 0 {
+		return nil
+	}
+
+	// 4. Fetch changed refs
+	fetchArgs := []string{"fetch", "--no-tags", ws.conf.Remote}
+	for _, u := range updates {
+		fetchArgs = append(fetchArgs, u.name+":"+u.name)
+	}
+	cmd = exec.CommandContext(ctx, "git", fetchArgs...)
+	envutil.SetDir(cmd, dir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git fetch: %v\n%s", err, out)
+	}
+
+	// 5. Lock corpus, enqueue tips, update knownRefs
+	c.mu.Lock()
+	for _, u := range updates {
+		h := c.gitHashFromHexStr(u.hash)
+		c.enqueueCommitLocked(h)
+		ws.knownRefs[u.name] = h
+	}
+	c.mu.Unlock()
+
+	// 6. Walk commit graph: index all queued commits
+	repo := &maintpb.GitRepo{Name: ws.conf.Name}
+	conf := polledGitCommits{repo: repo, dir: dir}
+	indexed := 0
+	for {
+		hash := c.gitCommitToIndex()
+		if hash == "" {
+			break
+		}
+		if err := c.indexCommit(conf, hash); err != nil {
+			return fmt.Errorf("indexing commit %v: %w", hash, err)
+		}
+		indexed++
+		if indexed%1000 == 0 {
+			log.Printf("Indexed %d git commits so far for %s ...", indexed, ws.conf.Name)
+		}
+	}
+	if indexed > 0 {
+		log.Printf("Indexed %d new git commits for %s", indexed, ws.conf.Name)
+	}
+	return nil
+}
+
+func mustDecodeHex(s string) string {
+	var buf [20]byte
+	_, err := hex.Decode(buf[:], []byte(s))
+	if err != nil {
+		panic(fmt.Sprintf("bad hex %q: %v", s, err))
+	}
+	return string(buf[:])
 }

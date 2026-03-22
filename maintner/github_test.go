@@ -1090,3 +1090,186 @@ func TestParseGithubRefs(t *testing.T) {
 		}
 	}
 }
+
+func TestProcessMutation_Reactions_IssueBody(t *testing.T) {
+	c := new(Corpus)
+
+	// Create an issue.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "golang",
+			Repo:   "go",
+			Number: 1,
+			User:   &maintpb.GithubUser{Id: 1, Login: "user1"},
+		},
+	})
+
+	// Add reactions.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "golang",
+			Repo:   "go",
+			Number: 1,
+			Reaction: []*maintpb.GithubReaction{
+				{Id: 100, UserId: 1, Content: "+1"},
+				{Id: 101, UserId: 2, Content: "heart"},
+			},
+		},
+	})
+
+	gi := c.github.repos[GitHubRepoID{"golang", "go"}].issues[1]
+	if len(gi.reactions) != 2 {
+		t.Fatalf("got %d reactions, want 2", len(gi.reactions))
+	}
+	if gi.reactions[100].Content != "+1" {
+		t.Errorf("reaction 100 content = %q, want +1", gi.reactions[100].Content)
+	}
+	if gi.reactions[101].Content != "heart" {
+		t.Errorf("reaction 101 content = %q, want heart", gi.reactions[101].Content)
+	}
+
+	// Remove one reaction.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:             "golang",
+			Repo:              "go",
+			Number:            1,
+			RemovedReactionId: []int64{100},
+		},
+	})
+
+	if len(gi.reactions) != 1 {
+		t.Fatalf("got %d reactions after removal, want 1", len(gi.reactions))
+	}
+	if _, ok := gi.reactions[100]; ok {
+		t.Error("reaction 100 should have been removed")
+	}
+	if gi.reactions[101] == nil {
+		t.Error("reaction 101 should still exist")
+	}
+}
+
+func TestProcessMutation_Reactions_Comment(t *testing.T) {
+	c := new(Corpus)
+
+	// Create issue with a comment.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "golang",
+			Repo:   "go",
+			Number: 2,
+			User:   &maintpb.GithubUser{Id: 1, Login: "user1"},
+			Comment: []*maintpb.GithubIssueCommentMutation{
+				{Id: 50, User: &maintpb.GithubUser{Id: 2, Login: "user2"}, Body: "hello"},
+			},
+		},
+	})
+
+	// Add reaction to comment.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "golang",
+			Repo:   "go",
+			Number: 2,
+			Comment: []*maintpb.GithubIssueCommentMutation{
+				{
+					Id: 50,
+					Reaction: []*maintpb.GithubReaction{
+						{Id: 200, UserId: 3, Content: "rocket"},
+					},
+				},
+			},
+		},
+	})
+
+	gc := c.github.repos[GitHubRepoID{"golang", "go"}].issues[2].comments[50]
+	if len(gc.reactions) != 1 {
+		t.Fatalf("got %d comment reactions, want 1", len(gc.reactions))
+	}
+	if gc.reactions[200].Content != "rocket" {
+		t.Errorf("reaction content = %q, want rocket", gc.reactions[200].Content)
+	}
+
+	// Remove it.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "golang",
+			Repo:   "go",
+			Number: 2,
+			Comment: []*maintpb.GithubIssueCommentMutation{
+				{
+					Id:                50,
+					RemovedReactionId: []int64{200},
+				},
+			},
+		},
+	})
+
+	if len(gc.reactions) != 0 {
+		t.Fatalf("got %d comment reactions after removal, want 0", len(gc.reactions))
+	}
+}
+
+func TestForeachReaction(t *testing.T) {
+	c := new(Corpus)
+
+	// Create issue with reactions.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "golang",
+			Repo:   "go",
+			Number: 3,
+			User:   &maintpb.GithubUser{Id: 1, Login: "user1"},
+			Reaction: []*maintpb.GithubReaction{
+				{Id: 300, UserId: 1, Content: "+1"},
+				{Id: 301, UserId: 2, Content: "heart"},
+				{Id: 302, UserId: 3, Content: "-1"},
+			},
+		},
+	})
+
+	gi := c.github.repos[GitHubRepoID{"golang", "go"}].issues[3]
+	var got []string
+	gi.ForeachReaction(func(r *GitHubReaction) error {
+		got = append(got, fmt.Sprintf("%d:%s", r.ID, r.Content))
+		return nil
+	})
+	// All reactions have zero Created time, so sorted by ID.
+	want := []string{"300:+1", "301:heart", "302:-1"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ForeachReaction = %v, want %v", got, want)
+	}
+}
+
+func TestReactionStatus(t *testing.T) {
+	c := new(Corpus)
+
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "golang",
+			Repo:   "go",
+			Number: 4,
+			User:   &maintpb.GithubUser{Id: 1, Login: "user1"},
+		},
+	})
+
+	gi := c.github.repos[GitHubRepoID{"golang", "go"}].issues[4]
+	if !gi.reactionsSyncedAsOf.IsZero() {
+		t.Error("reactionsSyncedAsOf should be zero before any sync")
+	}
+
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "golang",
+			Repo:   "go",
+			Number: 4,
+			ReactionStatus: &maintpb.GithubIssueSyncStatus{
+				ServerDate: timestamppb.Now(),
+			},
+		},
+	})
+
+	if gi.reactionsSyncedAsOf.IsZero() {
+		t.Error("reactionsSyncedAsOf should be set after reaction_status mutation")
+	}
+}

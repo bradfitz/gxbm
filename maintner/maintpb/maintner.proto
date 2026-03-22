@@ -85,7 +85,11 @@ message GithubIssueMutation {
   repeated GithubReview review = 29;  // new reviews to add
   GithubIssueSyncStatus review_status = 30;
 
-  // Next tag: 32
+  repeated GithubReaction reaction = 32;        // reactions on the issue body
+  repeated int64 removed_reaction_id = 33;      // reaction IDs removed from the issue body
+  GithubIssueSyncStatus reaction_status = 34;   // sync cursor for reactions
+
+  // Next tag: 35
 }
 
 // BoolChange represents a change to a boolean value.
@@ -214,14 +218,26 @@ message GithubIssueSyncStatus {
 message GithubIssueCommentMutation {
   int64 id = 1;
   GithubUser user = 2; // not present in edits later
-  string body = 3;   // may not be present in edits later (if only reactions changed? TODO: investigate)
+  string body = 3;   // may not be present in edits later
   google.protobuf.Timestamp created = 4; // not present in edits later
   google.protobuf.Timestamp updated = 5;
+
+  repeated GithubReaction reaction = 6;        // reactions on this comment
+  repeated int64 removed_reaction_id = 7;      // reaction IDs removed from this comment
+
+  // Next tag: 8
 }
 
 message GithubUser {
   int64 id = 1;
   string login = 2;
+}
+
+message GithubReaction {
+  int64 id = 1;
+  int64 user_id = 2;
+  string content = 3;   // "+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"
+  google.protobuf.Timestamp created = 4;
 }
 
 message GithubTeam {

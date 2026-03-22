@@ -281,9 +281,11 @@ type GitHubIssue struct {
 	comments           map[int64]*GitHubComment    // by comment.ID
 	eventMaxTime       time.Time                   // latest time of any event in events map
 	eventsSyncedAsOf   time.Time                   // as of server's Date header
-	reviewsSyncedAsOf  time.Time                   // as of server's Date header
-	events             map[int64]*GitHubIssueEvent // by event.ID
-	reviews            map[int64]*GitHubReview     // by event.ID
+	reviewsSyncedAsOf    time.Time                   // as of server's Date header
+	events               map[int64]*GitHubIssueEvent // by event.ID
+	reviews              map[int64]*GitHubReview     // by event.ID
+	reactions            map[int64]*GitHubReaction   // by reaction.ID, on the issue body
+	reactionsSyncedAsOf  time.Time                   // as of server's Date header
 }
 
 // LastModified reports the most recent time that any known metadata was updated.
@@ -365,6 +367,62 @@ func (gi *GitHubIssue) ForeachComment(fn func(*GitHubComment) error) error {
 		}
 	}
 	return nil
+}
+
+// ForeachReaction calls fn for each reaction on the issue body,
+// sorted by creation time.
+func (gi *GitHubIssue) ForeachReaction(fn func(*GitHubReaction) error) error {
+	s := make([]*GitHubReaction, 0, len(gi.reactions))
+	for _, r := range gi.reactions {
+		s = append(s, r)
+	}
+	sort.Slice(s, func(i, j int) bool {
+		ci, cj := s[i].Created, s[j].Created
+		if ci.Before(cj) {
+			return true
+		}
+		return ci.Equal(cj) && s[i].ID < s[j].ID
+	})
+	for _, r := range s {
+		if err := fn(r); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ForeachReaction calls fn for each reaction on the comment,
+// sorted by creation time.
+func (gc *GitHubComment) ForeachReaction(fn func(*GitHubReaction) error) error {
+	s := make([]*GitHubReaction, 0, len(gc.reactions))
+	for _, r := range gc.reactions {
+		s = append(s, r)
+	}
+	sort.Slice(s, func(i, j int) bool {
+		ci, cj := s[i].Created, s[j].Created
+		if ci.Before(cj) {
+			return true
+		}
+		return ci.Equal(cj) && s[i].ID < s[j].ID
+	})
+	for _, r := range s {
+		if err := fn(r); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (g *GitHub) newGithubReaction(p *maintpb.GithubReaction) *GitHubReaction {
+	r := &GitHubReaction{
+		ID:      p.Id,
+		User:    g.getOrCreateUserID(p.UserId),
+		Content: p.Content,
+	}
+	if p.Created != nil {
+		r.Created = p.Created.AsTime()
+	}
+	return r
 }
 
 // HasLabel reports whether the issue is labeled with the given label.
@@ -562,11 +620,20 @@ func (r *GitHubRepo) newGithubReview(p *maintpb.GithubReview) *GitHubReview {
 }
 
 type GitHubComment struct {
+	ID        int64
+	User      *GitHubUser
+	Created   time.Time
+	Updated   time.Time
+	Body      string
+	reactions map[int64]*GitHubReaction // by reaction.ID
+}
+
+// GitHubReaction represents an emoji reaction on an issue or comment.
+type GitHubReaction struct {
 	ID      int64
 	User    *GitHubUser
+	Content string    // "+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"
 	Created time.Time
-	Updated time.Time
-	Body    string
 }
 
 // GitHubDismissedReviewEvent is the contents of a dismissed review event. For more
@@ -1363,6 +1430,18 @@ func (c *Corpus) processGithubIssueMutation(m *maintpb.GithubIssueMutation) {
 		if cmut.Body != "" {
 			gc.Body = cmut.Body
 		}
+		for _, rmut := range cmut.Reaction {
+			if rmut.Id == 0 {
+				continue
+			}
+			if gc.reactions == nil {
+				gc.reactions = make(map[int64]*GitHubReaction)
+			}
+			gc.reactions[rmut.Id] = c.github.newGithubReaction(rmut)
+		}
+		for _, rid := range cmut.RemovedReactionId {
+			delete(gc.reactions, rid)
+		}
 	}
 	if m.CommentStatus != nil && m.CommentStatus.ServerDate != nil {
 		gi.commentsSyncedAsOf = m.CommentStatus.ServerDate.AsTime().UTC()
@@ -1402,6 +1481,22 @@ func (c *Corpus) processGithubIssueMutation(m *maintpb.GithubIssueMutation) {
 	}
 	if m.ReviewStatus != nil && m.ReviewStatus.ServerDate != nil {
 		gi.reviewsSyncedAsOf = m.ReviewStatus.ServerDate.AsTime().UTC()
+	}
+
+	for _, rmut := range m.Reaction {
+		if rmut.Id == 0 {
+			continue
+		}
+		if gi.reactions == nil {
+			gi.reactions = make(map[int64]*GitHubReaction)
+		}
+		gi.reactions[rmut.Id] = c.github.newGithubReaction(rmut)
+	}
+	for _, rid := range m.RemovedReactionId {
+		delete(gi.reactions, rid)
+	}
+	if m.ReactionStatus != nil && m.ReactionStatus.ServerDate != nil {
+		gi.reactionsSyncedAsOf = m.ReactionStatus.ServerDate.AsTime().UTC()
 	}
 }
 

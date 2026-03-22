@@ -753,7 +753,7 @@ func (gp *GerritProject) processMutation(gm *maintpb.GerritMutation) {
 	for _, commitp := range gm.Commits {
 		gc, err := c.processGitCommit(commitp)
 		if err != nil {
-			gp.logf("error processing commit %q: %v", commitp.Sha1, err)
+			gp.logf("error processing commit %q: %v", commitp.Hash, err)
 			continue
 		}
 		gp.commit[gc.Hash] = gc
@@ -775,7 +775,7 @@ func (gp *GerritProject) processMutation(gm *maintpb.GerritMutation) {
 
 	for _, refp := range gm.Refs {
 		refName := refp.Ref
-		hash := c.gitHashFromHexStr(refp.Sha1)
+		hash := c.gitHashFromHexStr(refp.Hash)
 		m := rxChangeRef.FindStringSubmatch(refName)
 		if m == nil {
 			if strings.HasPrefix(refName, "refs/meta/") {
@@ -1114,7 +1114,7 @@ func (gp *GerritProject) syncOnce(ctx context.Context) error {
 			toFetch = append(toFetch, hash)
 			changedRefs = append(changedRefs, &maintpb.GitRef{
 				Ref:  refName,
-				Sha1: sha1,
+				Hash: sha1,
 			})
 		}
 	}

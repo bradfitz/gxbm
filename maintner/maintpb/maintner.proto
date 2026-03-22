@@ -270,9 +270,11 @@ message GitRepo {
 }
 
 message GitCommit {
-  string sha1 = 1; // the full lowercase 40-hex-byte sha1 sum
+  // hash is the full lowercase hex object hash.
+  // Typically 40 hex bytes (SHA-1) but may be longer for SHA-256 repos.
+  string hash = 1;
 
-  // raw is the "git cat-file commit $sha1" output.
+  // raw is the "git cat-file commit <hash>" output.
   bytes raw = 2;
 
   GitDiffTree diff_tree = 3;
@@ -291,10 +293,25 @@ message GitDiffTreeFile {
   bool   binary = 4;
 }
 
+// GitTag represents an annotated tag object. Lightweight tags do not have
+// a tag object; they are just a ref pointing directly at a commit and are
+// recorded only as a GitRef ref_update, not as a GitTag.
+//
+// For annotated tags, the ref (e.g. "refs/tags/v1.0") points to the tag
+// object (hash), which in turn points to the tagged commit (target_hash).
 message GitTag {
-  string sha1 = 1;         // the tag object's own hash (40 hex bytes)
-  bytes raw = 2;            // output of "git cat-file tag $sha1"
-  string target_sha1 = 3;   // the object (usually commit) the tag points to
+  // hash is the annotated tag object's own hex hash.
+  // Typically 40 hex bytes (SHA-1) but may be longer for SHA-256 repos.
+  // This is what the refs/tags/<name> ref points to.
+  string hash = 1;
+  // raw is the "git cat-file tag <hash>" output, containing the tag's
+  // headers (object, type, tag, tagger) and the tag message.
+  bytes raw = 2;
+  // target_hash is the hex hash of the object this tag points to.
+  // For the common case this is a commit hash. In rare cases a tag can
+  // point to a tree, blob, or even another tag object.
+  // Typically 40 hex bytes (SHA-1).
+  string target_hash = 3;
 }
 
 message GerritMutation {
@@ -321,6 +338,7 @@ message GitRef {
   //    refs/meta/config
   string ref = 1;
 
-  // sha1 is the lowercase hex sha1
-  string sha1 = 2;
+  // hash is the lowercase hex object hash.
+  // Typically 40 hex bytes (SHA-1) but may be longer for SHA-256 repos.
+  string hash = 2;
 }

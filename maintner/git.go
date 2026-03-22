@@ -324,7 +324,7 @@ func parseCommitFromGit(dir string, hash GitHash) (*maintpb.GitCommit, error) {
 	}
 	switch len(hash) {
 	case 20:
-		commit.Sha1 = hash.String()
+		commit.Hash = hash.String()
 	default:
 		return nil, fmt.Errorf("unsupported git hash %q", hash.String())
 	}
@@ -345,20 +345,20 @@ func parseTagFromGit(dir string, hash GitHash) (*maintpb.GitTag, error) {
 	}
 	hdr := catFile[:i]
 
-	var targetSha1 string
+	var targetHash string
 	for _, ln := range bytes.Split(hdr, []byte("\n")) {
 		if bytes.HasPrefix(ln, objectSpace) {
-			targetSha1 = string(ln[len(objectSpace):])
+			targetHash = string(ln[len(objectSpace):])
 		}
 	}
-	if targetSha1 == "" {
+	if targetHash == "" {
 		return nil, fmt.Errorf("tag %v missing object header", hash)
 	}
 
 	tag := &maintpb.GitTag{
-		Sha1:       hash.String(),
+		Hash:       hash.String(),
 		Raw:        catFile,
-		TargetSha1: targetSha1,
+		TargetHash: targetHash,
 	}
 	return tag, nil
 }
@@ -417,7 +417,7 @@ func (c *Corpus) processGitMutation(m *maintpb.GitMutation) {
 			refs = make(map[string]GitHash)
 			c.gitRefs[repoName] = refs
 		}
-		refs[ru.Ref] = c.gitHashFromHexStr(ru.Sha1)
+		refs[ru.Ref] = c.gitHashFromHexStr(ru.Hash)
 	}
 
 	if tag := m.Tag; tag != nil {
@@ -430,11 +430,11 @@ func (c *Corpus) processGitMutation(m *maintpb.GitMutation) {
 
 // c.mu is held for writing.
 func (c *Corpus) processGitTag(tag *maintpb.GitTag) *GitTag {
-	if len(tag.Sha1) != 40 || len(tag.TargetSha1) != 40 {
-		log.Printf("bogus git tag sha1 %q / target %q", tag.Sha1, tag.TargetSha1)
+	if len(tag.Hash) != 40 || len(tag.TargetHash) != 40 {
+		log.Printf("bogus git tag hash %q / target %q", tag.Hash, tag.TargetHash)
 		return &GitTag{}
 	}
-	hash := c.gitHashFromHexStr(tag.Sha1)
+	hash := c.gitHashFromHexStr(tag.Hash)
 	if gt, ok := c.gitTags[hash]; ok {
 		return gt
 	}
@@ -444,7 +444,7 @@ func (c *Corpus) processGitTag(tag *maintpb.GitTag) *GitTag {
 
 	gt := &GitTag{
 		Hash:   hash,
-		Target: c.gitHashFromHexStr(tag.TargetSha1),
+		Target: c.gitHashFromHexStr(tag.TargetHash),
 		Msg:    c.strb(msg),
 	}
 
@@ -472,10 +472,10 @@ func (c *Corpus) processGitCommit(commit *maintpb.GitCommit) (*GitCommit, error)
 	if c.gitCommit == nil {
 		c.gitCommit = map[GitHash]*GitCommit{}
 	}
-	if len(commit.Sha1) != 40 {
-		return nil, fmt.Errorf("bogus git sha1 %q", commit.Sha1)
+	if len(commit.Hash) != 40 {
+		return nil, fmt.Errorf("bogus git hash %q", commit.Hash)
 	}
-	hash := c.gitHashFromHexStr(commit.Sha1)
+	hash := c.gitHashFromHexStr(commit.Hash)
 
 	catFile := commit.Raw
 	i := bytes.Index(catFile, nlnl)
@@ -832,7 +832,7 @@ func (c *Corpus) syncGitRepoOnce(ctx context.Context, ws *watchedGitRepoState, d
 					Tag:  tag,
 				},
 			})
-			u.commitHash = tag.TargetSha1
+			u.commitHash = tag.TargetHash
 		} else {
 			u.commitHash = u.hash
 		}
@@ -874,7 +874,7 @@ func (c *Corpus) syncGitRepoOnce(ctx context.Context, ws *watchedGitRepoState, d
 				Repo: repo,
 				RefUpdate: &maintpb.GitRef{
 					Ref:  u.name,
-					Sha1: u.hash,
+					Hash: u.hash,
 				},
 			},
 		})

@@ -1548,8 +1548,10 @@ func (x *GitRepo) GetName() string {
 
 type GitCommit struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	Sha1  string                 `protobuf:"bytes,1,opt,name=sha1,proto3" json:"sha1,omitempty"` // the full lowercase 40-hex-byte sha1 sum
-	// raw is the "git cat-file commit $sha1" output.
+	// hash is the full lowercase hex object hash.
+	// Typically 40 hex bytes (SHA-1) but may be longer for SHA-256 repos.
+	Hash string `protobuf:"bytes,1,opt,name=hash,proto3" json:"hash,omitempty"`
+	// raw is the "git cat-file commit <hash>" output.
 	Raw           []byte       `protobuf:"bytes,2,opt,name=raw,proto3" json:"raw,omitempty"`
 	DiffTree      *GitDiffTree `protobuf:"bytes,3,opt,name=diff_tree,json=diffTree,proto3" json:"diff_tree,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -1586,9 +1588,9 @@ func (*GitCommit) Descriptor() ([]byte, []int) {
 	return file_maintner_proto_rawDescGZIP(), []int{18}
 }
 
-func (x *GitCommit) GetSha1() string {
+func (x *GitCommit) GetHash() string {
 	if x != nil {
-		return x.Sha1
+		return x.Hash
 	}
 	return ""
 }
@@ -1721,11 +1723,26 @@ func (x *GitDiffTreeFile) GetBinary() bool {
 	return false
 }
 
+// GitTag represents an annotated tag object. Lightweight tags do not have
+// a tag object; they are just a ref pointing directly at a commit and are
+// recorded only as a GitRef ref_update, not as a GitTag.
+//
+// For annotated tags, the ref (e.g. "refs/tags/v1.0") points to the tag
+// object (hash), which in turn points to the tagged commit (target_hash).
 type GitTag struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Sha1          string                 `protobuf:"bytes,1,opt,name=sha1,proto3" json:"sha1,omitempty"`                               // the tag object's own hash (40 hex bytes)
-	Raw           []byte                 `protobuf:"bytes,2,opt,name=raw,proto3" json:"raw,omitempty"`                                 // output of "git cat-file tag $sha1"
-	TargetSha1    string                 `protobuf:"bytes,3,opt,name=target_sha1,json=targetSha1,proto3" json:"target_sha1,omitempty"` // the object (usually commit) the tag points to
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// hash is the annotated tag object's own hex hash.
+	// Typically 40 hex bytes (SHA-1) but may be longer for SHA-256 repos.
+	// This is what the refs/tags/<name> ref points to.
+	Hash string `protobuf:"bytes,1,opt,name=hash,proto3" json:"hash,omitempty"`
+	// raw is the "git cat-file tag <hash>" output, containing the tag's
+	// headers (object, type, tag, tagger) and the tag message.
+	Raw []byte `protobuf:"bytes,2,opt,name=raw,proto3" json:"raw,omitempty"`
+	// target_hash is the hex hash of the object this tag points to.
+	// For the common case this is a commit hash. In rare cases a tag can
+	// point to a tree, blob, or even another tag object.
+	// Typically 40 hex bytes (SHA-1).
+	TargetHash    string `protobuf:"bytes,3,opt,name=target_hash,json=targetHash,proto3" json:"target_hash,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1760,9 +1777,9 @@ func (*GitTag) Descriptor() ([]byte, []int) {
 	return file_maintner_proto_rawDescGZIP(), []int{21}
 }
 
-func (x *GitTag) GetSha1() string {
+func (x *GitTag) GetHash() string {
 	if x != nil {
-		return x.Sha1
+		return x.Hash
 	}
 	return ""
 }
@@ -1774,9 +1791,9 @@ func (x *GitTag) GetRaw() []byte {
 	return nil
 }
 
-func (x *GitTag) GetTargetSha1() string {
+func (x *GitTag) GetTargetHash() string {
 	if x != nil {
-		return x.TargetSha1
+		return x.TargetHash
 	}
 	return ""
 }
@@ -1864,8 +1881,9 @@ type GitRef struct {
 	//	refs/changes/00/14700/meta
 	//	refs/meta/config
 	Ref string `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`
-	// sha1 is the lowercase hex sha1
-	Sha1          string `protobuf:"bytes,2,opt,name=sha1,proto3" json:"sha1,omitempty"`
+	// hash is the lowercase hex object hash.
+	// Typically 40 hex bytes (SHA-1) but may be longer for SHA-256 repos.
+	Hash          string `protobuf:"bytes,2,opt,name=hash,proto3" json:"hash,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1907,9 +1925,9 @@ func (x *GitRef) GetRef() string {
 	return ""
 }
 
-func (x *GitRef) GetSha1() string {
+func (x *GitRef) GetHash() string {
 	if x != nil {
-		return x.Sha1
+		return x.Hash
 	}
 	return ""
 }
@@ -2056,7 +2074,7 @@ const file_maintner_proto_rawDesc = "" +
 	"\ago_repo\x18\x01 \x01(\tR\x06goRepo\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\"d\n" +
 	"\tGitCommit\x12\x12\n" +
-	"\x04sha1\x18\x01 \x01(\tR\x04sha1\x12\x10\n" +
+	"\x04hash\x18\x01 \x01(\tR\x04hash\x12\x10\n" +
 	"\x03raw\x18\x02 \x01(\fR\x03raw\x121\n" +
 	"\tdiff_tree\x18\x03 \x01(\v2\x14.maintpb.GitDiffTreeR\bdiffTree\";\n" +
 	"\vGitDiffTree\x12,\n" +
@@ -2067,10 +2085,10 @@ const file_maintner_proto_rawDesc = "" +
 	"\adeleted\x18\x03 \x01(\x03R\adeleted\x12\x16\n" +
 	"\x06binary\x18\x04 \x01(\bR\x06binary\"O\n" +
 	"\x06GitTag\x12\x12\n" +
-	"\x04sha1\x18\x01 \x01(\tR\x04sha1\x12\x10\n" +
+	"\x04hash\x18\x01 \x01(\tR\x04hash\x12\x10\n" +
 	"\x03raw\x18\x02 \x01(\fR\x03raw\x12\x1f\n" +
-	"\vtarget_sha1\x18\x03 \x01(\tR\n" +
-	"targetSha1\"\xa0\x01\n" +
+	"\vtarget_hash\x18\x03 \x01(\tR\n" +
+	"targetHash\"\xa0\x01\n" +
 	"\x0eGerritMutation\x12\x18\n" +
 	"\aproject\x18\x01 \x01(\tR\aproject\x12,\n" +
 	"\acommits\x18\x02 \x03(\v2\x12.maintpb.GitCommitR\acommits\x12#\n" +
@@ -2078,7 +2096,7 @@ const file_maintner_proto_rawDesc = "" +
 	"\fdeleted_refs\x18\x04 \x03(\tR\vdeletedRefs\".\n" +
 	"\x06GitRef\x12\x10\n" +
 	"\x03ref\x18\x01 \x01(\tR\x03ref\x12\x12\n" +
-	"\x04sha1\x18\x02 \x01(\tR\x04sha1B%Z#golang.org/x/build/maintner/maintpbb\x06proto3"
+	"\x04hash\x18\x02 \x01(\tR\x04hashB%Z#golang.org/x/build/maintner/maintpbb\x06proto3"
 
 var (
 	file_maintner_proto_rawDescOnce sync.Once

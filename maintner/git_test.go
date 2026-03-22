@@ -361,7 +361,7 @@ func TestGitSyncAnnotatedTag(t *testing.T) {
 	if !hasTagRef {
 		t.Error("no ref update for annotated tag")
 	}
-	if tagMut != nil && tagMut.TargetSha1 == "" {
+	if tagMut != nil && tagMut.TargetHash == "" {
 		t.Error("tag mutation missing target_sha1")
 	}
 

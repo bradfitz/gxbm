@@ -238,6 +238,9 @@ message GitMutation {
 
   // ref_update records that a ref now points to a given hash.
   GitRef ref_update = 3;
+
+  // tag adds an annotated tag object.
+  GitTag tag = 4;
 }
 
 // GitRepo identifies a git repo being mutated.
@@ -270,6 +273,12 @@ message GitDiffTreeFile {
   int64  added = 2;
   int64  deleted = 3;
   bool   binary = 4;
+}
+
+message GitTag {
+  string sha1 = 1;         // the tag object's own hash (40 hex bytes)
+  bytes raw = 2;            // output of "git cat-file tag $sha1"
+  string target_sha1 = 3;   // the object (usually commit) the tag points to
 }
 
 message GerritMutation {

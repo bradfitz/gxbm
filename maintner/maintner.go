@@ -17,6 +17,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -56,9 +57,10 @@ type Corpus struct {
 	watchedGitRepoConfigs []watchedGitRepoState
 	gitPeople             map[string]*GitPerson
 	gitCommit             map[GitHash]*GitCommit
-	gitRepos              map[string]bool             // repo names seen in git mutations
+	gitRepos              map[string]bool               // repo names seen in git mutations
 	gitRefs               map[string]map[string]GitHash // repo name -> ref name -> hash
-	gitCommitTodo         map[GitHash]bool           // -> true
+	gitTags               map[GitHash]*GitTag           // tag object hash -> parsed tag
+	gitCommitTodo         map[GitHash]bool              // -> true
 	gitOfHg               map[string]GitHash        // hg hex hash -> git hash
 	zoneCache             map[string]*time.Location // "+0530" => location
 }
@@ -590,4 +592,44 @@ func (c *Corpus) ForeachGitRepoRef(repoName string, fn func(GitRefInfo) error) e
 		}
 	}
 	return nil
+}
+
+// GitTagInfo represents a tag ref in a git repo.
+type GitTagInfo struct {
+	Repo       string  // repo name
+	Ref        string  // e.g. "refs/tags/v1.0.0"
+	Hash       GitHash // what the ref points to (commit for lightweight, tag object for annotated)
+	CommitHash GitHash // the underlying commit (same as Hash for lightweight tags)
+	Tag        *GitTag // non-nil for annotated tags; nil for lightweight tags
+}
+
+// ForeachGitTag calls fn for each tag ref in the named repo.
+// Both lightweight and annotated tags are included.
+func (c *Corpus) ForeachGitTag(repoName string, fn func(GitTagInfo) error) error {
+	for ref, hash := range c.gitRefs[repoName] {
+		if !strings.HasPrefix(ref, "refs/tags/") {
+			continue
+		}
+		info := GitTagInfo{
+			Repo: repoName,
+			Ref:  ref,
+			Hash: hash,
+		}
+		if gt := c.gitTags[hash]; gt != nil {
+			info.Tag = gt
+			info.CommitHash = gt.Target
+		} else {
+			info.CommitHash = hash
+		}
+		if err := fn(info); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// GitTagByHash returns the parsed annotated tag object for the given hash,
+// or nil if the hash is not a known tag object.
+func (c *Corpus) GitTagByHash(hash GitHash) *GitTag {
+	return c.gitTags[hash]
 }

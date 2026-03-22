@@ -83,6 +83,17 @@ type GitCommit struct {
 	Repo       string      // repo name from GitRepo.Name or GitRepo.GoRepo
 }
 
+// GitTag represents an annotated tag object in a git repository.
+type GitTag struct {
+	Hash       GitHash    // the tag object's own hash
+	Target     GitHash    // the object (usually commit) this tag points at
+	Tagger     *GitPerson // may be nil for unusual tags
+	TaggerTime time.Time
+	Name       string // tag name from the "tag" header line
+	Msg        string // tag message
+	Repo       string // repo name
+}
+
 func (gc *GitCommit) String() string {
 	if gc == nil {
 		return "<nil *GitCommit>"
@@ -249,6 +260,10 @@ var (
 	golangHgSpace  = []byte("golang-hg ")
 	gpgSigSpace    = []byte("gpgsig ")
 	encodingSpace  = []byte("encoding ")
+	objectSpace    = []byte("object ")
+	typeSpace      = []byte("type ")
+	tagSpace       = []byte("tag ")
+	taggerSpace    = []byte("tagger ")
 	space          = []byte(" ")
 )
 
@@ -316,6 +331,38 @@ func parseCommitFromGit(dir string, hash GitHash) (*maintpb.GitCommit, error) {
 	return commit, nil
 }
 
+func parseTagFromGit(dir string, hash GitHash) (*maintpb.GitTag, error) {
+	cmd := exec.Command("git", "cat-file", "tag", hash.String())
+	envutil.SetDir(cmd, dir)
+	catFile, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git cat-file tag %v: %v", hash, err)
+	}
+
+	i := bytes.Index(catFile, nlnl)
+	if i < 0 {
+		return nil, fmt.Errorf("tag %v lacks double newline", hash)
+	}
+	hdr := catFile[:i]
+
+	var targetSha1 string
+	for _, ln := range bytes.Split(hdr, []byte("\n")) {
+		if bytes.HasPrefix(ln, objectSpace) {
+			targetSha1 = string(ln[len(objectSpace):])
+		}
+	}
+	if targetSha1 == "" {
+		return nil, fmt.Errorf("tag %v missing object header", hash)
+	}
+
+	tag := &maintpb.GitTag{
+		Sha1:       hash.String(),
+		Raw:        catFile,
+		TargetSha1: targetSha1,
+	}
+	return tag, nil
+}
+
 func (c *Corpus) indexCommit(conf polledGitCommits, hash GitHash) error {
 	if conf.repo == nil {
 		panic("bogus config; nil repo")
@@ -372,6 +419,52 @@ func (c *Corpus) processGitMutation(m *maintpb.GitMutation) {
 		}
 		refs[ru.Ref] = c.gitHashFromHexStr(ru.Sha1)
 	}
+
+	if tag := m.Tag; tag != nil {
+		gt := c.processGitTag(tag)
+		if gt.Repo == "" && repoName != "" {
+			gt.Repo = repoName
+		}
+	}
+}
+
+// c.mu is held for writing.
+func (c *Corpus) processGitTag(tag *maintpb.GitTag) *GitTag {
+	if len(tag.Sha1) != 40 || len(tag.TargetSha1) != 40 {
+		log.Printf("bogus git tag sha1 %q / target %q", tag.Sha1, tag.TargetSha1)
+		return &GitTag{}
+	}
+	hash := c.gitHashFromHexStr(tag.Sha1)
+	if gt, ok := c.gitTags[hash]; ok {
+		return gt
+	}
+
+	catFile := tag.Raw
+	hdr, msg, _ := bytes.Cut(catFile, nlnl)
+
+	gt := &GitTag{
+		Hash:   hash,
+		Target: c.gitHashFromHexStr(tag.TargetSha1),
+		Msg:    c.strb(msg),
+	}
+
+	for ln := range bytes.SplitSeq(hdr, []byte("\n")) {
+		if bytes.HasPrefix(ln, taggerSpace) {
+			p, t, err := c.parsePerson(ln[len(taggerSpace):])
+			if err == nil {
+				gt.Tagger = p
+				gt.TaggerTime = t
+			}
+		} else if bytes.HasPrefix(ln, tagSpace) {
+			gt.Name = c.strb(ln[len(tagSpace):])
+		}
+	}
+
+	if c.gitTags == nil {
+		c.gitTags = make(map[GitHash]*GitTag)
+	}
+	c.gitTags[hash] = gt
+	return gt
 }
 
 // c.mu is held for writing.
@@ -663,8 +756,9 @@ func (c *Corpus) syncGitRepoOnce(ctx context.Context, ws *watchedGitRepoState, d
 
 	// 2. Parse and filter refs
 	type refUpdate struct {
-		name string
-		hash string // 40-char hex
+		name       string
+		hash       string // 40-char hex, what the ref points to (tag object or commit)
+		commitHash string // 40-char hex, the commit to index (same as hash for non-tags)
 	}
 	var updates []refUpdate
 
@@ -678,6 +772,11 @@ func (c *Corpus) syncGitRepoOnce(ctx context.Context, ws *watchedGitRepoState, d
 		}
 		hash, refName := fields[0], fields[1]
 		if len(hash) != 40 {
+			continue
+		}
+		// Skip peeled tag refs (e.g. "refs/tags/v1.0^{}") from ls-remote;
+		// we dereference tag objects ourselves.
+		if strings.HasSuffix(refName, "^{}") {
 			continue
 		}
 		if !ws.matchesRef(refName) {
@@ -706,7 +805,7 @@ func (c *Corpus) syncGitRepoOnce(ctx context.Context, ws *watchedGitRepoState, d
 	// 4. Fetch changed refs
 	fetchArgs := []string{"fetch", "--no-tags", ws.conf.Remote}
 	for _, u := range updates {
-		fetchArgs = append(fetchArgs, u.name+":"+u.name)
+		fetchArgs = append(fetchArgs, "+"+u.name+":"+u.name)
 	}
 	cmd = exec.CommandContext(ctx, "git", fetchArgs...)
 	envutil.SetDir(cmd, dir)
@@ -714,16 +813,40 @@ func (c *Corpus) syncGitRepoOnce(ctx context.Context, ws *watchedGitRepoState, d
 		return fmt.Errorf("git fetch: %v\n%s", err, out)
 	}
 
-	// 5. Lock corpus, enqueue commit tips
+	// 5. Classify objects, index tag objects, determine commit hashes
 	repo := &maintpb.GitRepo{Name: ws.conf.Name}
+	for i := range updates {
+		u := &updates[i]
+		objType, err := gitObjectType(ctx, dir, u.hash)
+		if err != nil {
+			return fmt.Errorf("git cat-file -t %s: %w", u.hash, err)
+		}
+		if objType == "tag" {
+			tag, err := parseTagFromGit(dir, GitHash(mustDecodeHex(u.hash)))
+			if err != nil {
+				return fmt.Errorf("parsing tag %s: %w", u.hash, err)
+			}
+			c.addMutation(&maintpb.Mutation{
+				Git: &maintpb.GitMutation{
+					Repo: repo,
+					Tag:  tag,
+				},
+			})
+			u.commitHash = tag.TargetSha1
+		} else {
+			u.commitHash = u.hash
+		}
+	}
+
+	// 6. Enqueue commit tips
 	c.mu.Lock()
 	for _, u := range updates {
-		h := c.gitHashFromHexStr(u.hash)
+		h := c.gitHashFromHexStr(u.commitHash)
 		c.enqueueCommitLocked(h)
 	}
 	c.mu.Unlock()
 
-	// 6. Walk commit graph: index all queued commits
+	// 7. Walk commit graph: index all queued commits
 	conf := polledGitCommits{repo: repo, dir: dir}
 	indexed := 0
 	for {
@@ -743,7 +866,8 @@ func (c *Corpus) syncGitRepoOnce(ctx context.Context, ws *watchedGitRepoState, d
 		log.Printf("Indexed %d new git commits for %s", indexed, ws.conf.Name)
 	}
 
-	// 7. Emit ref update mutations (after commits are indexed)
+	// 8. Emit ref update mutations (after commits are indexed).
+	// u.hash is the original hash from ls-remote (tag object for annotated tags).
 	for _, u := range updates {
 		c.addMutation(&maintpb.Mutation{
 			Git: &maintpb.GitMutation{
@@ -756,6 +880,18 @@ func (c *Corpus) syncGitRepoOnce(ctx context.Context, ws *watchedGitRepoState, d
 		})
 	}
 	return nil
+}
+
+// gitObjectType returns the git object type ("commit", "tag", "tree", "blob")
+// for the given hex hash.
+func gitObjectType(ctx context.Context, dir, hash string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "cat-file", "-t", hash)
+	envutil.SetDir(cmd, dir)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 func mustDecodeHex(s string) string {

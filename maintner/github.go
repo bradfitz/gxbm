@@ -5,6 +5,7 @@
 package maintner
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -2057,12 +2058,179 @@ func (p *githubRepoPoller) syncCommentsOnIssue(ctx context.Context, issueNum int
 	return nil
 }
 
+// graphqlRequest performs a GitHub GraphQL API request using the poller's
+// authenticated HTTP client.
+func (p *githubRepoPoller) graphqlRequest(ctx context.Context, query string, variables map[string]any, result any) error {
+	body := struct {
+		Query     string         `json:"query"`
+		Variables map[string]any `json:"variables,omitempty"`
+	}{query, variables}
+	bodyJSON, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", "https://api.github.com/graphql", bytes.NewReader(bodyJSON))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("graphql: HTTP %d: %s", resp.StatusCode, respBody)
+	}
+	var gqlResp struct {
+		Data   json.RawMessage `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&gqlResp); err != nil {
+		return fmt.Errorf("graphql: decoding response: %w", err)
+	}
+	if len(gqlResp.Errors) > 0 {
+		return fmt.Errorf("graphql: %s", gqlResp.Errors[0].Message)
+	}
+	return json.Unmarshal(gqlResp.Data, result)
+}
+
+const reactionCountScanQuery = `
+query($owner: String!, $name: String!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    issues(first: 100, after: $cursor, orderBy: {field: CREATED_AT, direction: ASC}) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number
+        reactions { totalCount }
+        comments(first: 100) {
+          pageInfo { hasNextPage endCursor }
+          nodes {
+            databaseId
+            reactions { totalCount }
+          }
+        }
+      }
+    }
+  }
+}
+`
+
+// scanReactionCounts uses the GitHub GraphQL API to efficiently scan all
+// issues and their comments for reaction count changes.
+func (p *githubRepoPoller) scanReactionCounts(ctx context.Context) error {
+	owner, repo := p.gr.id.Owner, p.gr.id.Repo
+	p.logf("scanning reaction counts via GraphQL...")
+
+	var cursor *string
+	scanned := 0
+	for {
+		vars := map[string]any{
+			"owner": owner,
+			"name":  repo,
+		}
+		if cursor != nil {
+			vars["cursor"] = *cursor
+		}
+
+		var result struct {
+			Repository struct {
+				Issues struct {
+					PageInfo struct {
+						HasNextPage bool   `json:"hasNextPage"`
+						EndCursor   string `json:"endCursor"`
+					} `json:"pageInfo"`
+					Nodes []struct {
+						Number    int `json:"number"`
+						Reactions struct {
+							TotalCount int `json:"totalCount"`
+						} `json:"reactions"`
+						Comments struct {
+							PageInfo struct {
+								HasNextPage bool   `json:"hasNextPage"`
+								EndCursor   string `json:"endCursor"`
+							} `json:"pageInfo"`
+							Nodes []struct {
+								DatabaseId int `json:"databaseId"`
+								Reactions  struct {
+									TotalCount int `json:"totalCount"`
+								} `json:"reactions"`
+							} `json:"nodes"`
+						} `json:"comments"`
+					} `json:"nodes"`
+				} `json:"issues"`
+			} `json:"repository"`
+		}
+
+		if err := p.graphqlRequest(ctx, reactionCountScanQuery, vars, &result); err != nil {
+			return fmt.Errorf("reaction count scan: %w", err)
+		}
+
+		p.c.mu.RLock()
+		for _, issue := range result.Repository.Issues.Nodes {
+			num := int32(issue.Number)
+			gi := p.gr.issues[num]
+
+			// Check issue-body reactions.
+			if gi == nil {
+				continue
+			}
+			if issue.Reactions.TotalCount != len(gi.reactions) {
+				p.staleReactionIssues[num] = true
+			}
+			// Also re-scan if never synced or stale (>24h).
+			if gi.reactionsSyncedAsOf.IsZero() {
+				if issue.Reactions.TotalCount > 0 || len(gi.reactions) > 0 {
+					p.staleReactionIssues[num] = true
+				}
+			} else if time.Since(gi.reactionsSyncedAsOf) > 24*time.Hour && len(gi.reactions) > 0 {
+				p.staleReactionIssues[num] = true
+			}
+
+			// Check comment reactions.
+			for _, c := range issue.Comments.Nodes {
+				gc := gi.comments[int64(c.DatabaseId)]
+				if gc == nil {
+					continue
+				}
+				if c.Reactions.TotalCount != len(gc.reactions) {
+					p.staleReactionIssues[num] = true
+				}
+			}
+
+			// TODO: handle comments.pageInfo.hasNextPage for issues with >100 comments.
+		}
+		p.c.mu.RUnlock()
+
+		scanned += len(result.Repository.Issues.Nodes)
+		if !result.Repository.Issues.PageInfo.HasNextPage {
+			break
+		}
+		endCursor := result.Repository.Issues.PageInfo.EndCursor
+		cursor = &endCursor
+	}
+
+	p.logf("reaction count scan complete: scanned %d issues, %d need updates", scanned, len(p.staleReactionIssues))
+	p.lastReactionScan = time.Now()
+	return nil
+}
+
 // syncReactions fetches detailed reactions for issues detected as having
 // changed reaction counts (opportunistically during syncIssues/syncComments),
 // or via the opt-in GraphQL count scan.
 func (p *githubRepoPoller) syncReactions(ctx context.Context) error {
-	// TODO: if GraphQL scanning is enabled and the scan interval has elapsed,
+	// If GraphQL scanning is enabled and the scan interval has elapsed,
 	// run scanReactionCounts and merge results into staleReactionIssues.
+	if interval := p.c.reactionScanInterval; interval > 0 {
+		if p.lastReactionScan.IsZero() || time.Since(p.lastReactionScan) >= interval {
+			if err := p.scanReactionCounts(ctx); err != nil {
+				return err
+			}
+		}
+	}
 
 	if len(p.staleReactionIssues) == 0 {
 		return nil

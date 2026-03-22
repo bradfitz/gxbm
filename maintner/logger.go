@@ -7,6 +7,7 @@ package maintner
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/bradfitz/gxbm/maintner/maintpb"
 	"github.com/bradfitz/gxbm/maintner/reclog"
+	"google.golang.org/protobuf/encoding/prototext"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -124,4 +126,55 @@ func (d *DiskMutationLogger) GetMutations(ctx context.Context) <-chan MutationSt
 		}
 	}()
 	return ch
+}
+
+// DevLogger wraps an existing MutationLogger and additionally writes
+// each mutation to a separate dev log file in human-readable prototext
+// format. The dev log file is truncated at creation time, so it only
+// contains mutations from the current run.
+//
+// This is intended for development: you can run the production sync
+// pipeline but divert new mutations to a dev file for inspection
+// without risking corruption of the production mutation log.
+//
+// If wrap is nil, mutations are only written to the dev file (not to
+// any production log).
+type DevLogger struct {
+	wrap MutationLogger // may be nil
+	f    *os.File
+	mu   sync.Mutex
+	n    int
+}
+
+// NewDevLogger creates a DevLogger that writes pretty-printed mutations
+// to the given file path (truncated at startup). If wrap is non-nil,
+// each mutation is also forwarded to wrap.Log.
+func NewDevLogger(path string, wrap MutationLogger) *DevLogger {
+	f, err := os.Create(path)
+	if err != nil {
+		log.Fatalf("creating dev mutation log: %v", err)
+	}
+	fmt.Fprintf(f, "# Dev mutation log started at %s\n\n", time.Now().UTC().Format(time.RFC3339))
+	return &DevLogger{wrap: wrap, f: f}
+}
+
+func (d *DevLogger) Log(m *maintpb.Mutation) error {
+	text, err := prototext.MarshalOptions{Multiline: true, Indent: "  "}.Marshal(m)
+	if err != nil {
+		return fmt.Errorf("dev logger: marshaling prototext: %w", err)
+	}
+
+	d.mu.Lock()
+	d.n++
+	n := d.n
+	fmt.Fprintf(d.f, "--- mutation #%d at %s ---\n%s\n", n, time.Now().UTC().Format(time.RFC3339), text)
+	d.f.Sync()
+	d.mu.Unlock()
+
+	log.Printf("[dev] mutation #%d:\n%s", n, text)
+
+	if d.wrap != nil {
+		return d.wrap.Log(m)
+	}
+	return nil
 }

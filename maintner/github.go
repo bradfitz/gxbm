@@ -1629,6 +1629,12 @@ type githubRepoPoller struct {
 	githubCaching *github.Client
 	githubDirect  *github.Client // not caching
 	client        httpClient     // the client used to poll github
+
+	// Reaction scanning state. These are transient per-sync-cycle maps
+	// populated during syncIssues/syncComments to detect reaction changes
+	// opportunistically from REST responses.
+	staleReactionIssues map[int32]bool // issue numbers needing reaction detail fetch
+	lastReactionScan    time.Time      // when the last full GraphQL scan ran
 }
 
 func (p *githubRepoPoller) Owner() string { return p.gr.id.Owner }
@@ -1640,6 +1646,7 @@ func (p *githubRepoPoller) logf(format string, args ...any) {
 
 func (p *githubRepoPoller) sync(ctx context.Context, expectChanges bool) error {
 	p.logf("Beginning sync.")
+	p.staleReactionIssues = make(map[int32]bool) // reset per cycle
 	if err := p.syncIssues(ctx, expectChanges); err != nil {
 		return err
 	}
@@ -1650,6 +1657,9 @@ func (p *githubRepoPoller) sync(ctx context.Context, expectChanges bool) error {
 		return err
 	}
 	if err := p.syncReviews(ctx); err != nil {
+		return err
+	}
+	if err := p.syncReactions(ctx); err != nil {
 		return err
 	}
 	return nil
@@ -1852,6 +1862,10 @@ func (p *githubRepoPoller) syncIssues(ctx context.Context, expectChanges bool) e
 			{
 				gi := p.gr.issues[int32(*is.Number)]
 				mp = p.gr.newMutationFromIssue(gi, is)
+				// Check if issue-body reaction counts changed.
+				if gi != nil && is.Reactions.GetTotalCount() != len(gi.reactions) {
+					p.staleReactionIssues[int32(*is.Number)] = true
+				}
 			}
 			p.c.mu.RUnlock()
 
@@ -1995,7 +2009,13 @@ func (p *githubRepoPoller) syncCommentsOnIssue(ctx context.Context, issueNum int
 			id := int64(*ic.ID)
 			cur := issue.comments[id]
 
-			// TODO: does a reaction update a comment's UpdatedAt time?
+			// Check if reaction counts changed on this comment.
+			// Reaction changes don't update the comment's UpdatedAt, so we
+			// detect them here by comparing API counts against corpus.
+			if cur != nil && ic.Reactions.GetTotalCount() != len(cur.reactions) {
+				p.staleReactionIssues[issueNum] = true
+			}
+
 			var cmut *maintpb.GithubIssueCommentMutation
 			if cur == nil {
 				cmut = &maintpb.GithubIssueCommentMutation{
@@ -2035,6 +2055,151 @@ func (p *githubRepoPoller) syncCommentsOnIssue(ctx context.Context, issueNum int
 		p.c.addMutation(mut)
 	}
 	return nil
+}
+
+// syncReactions fetches detailed reactions for issues detected as having
+// changed reaction counts (opportunistically during syncIssues/syncComments),
+// or via the opt-in GraphQL count scan.
+func (p *githubRepoPoller) syncReactions(ctx context.Context) error {
+	// TODO: if GraphQL scanning is enabled and the scan interval has elapsed,
+	// run scanReactionCounts and merge results into staleReactionIssues.
+
+	if len(p.staleReactionIssues) == 0 {
+		return nil
+	}
+
+	issueNums := make([]int32, 0, len(p.staleReactionIssues))
+	for n := range p.staleReactionIssues {
+		issueNums = append(issueNums, n)
+	}
+	slices.Sort(issueNums)
+
+	for _, num := range issueNums {
+		if err := p.syncReactionsOnIssue(ctx, num); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// syncReactionsOnIssue fetches all reactions on the given issue (body + comments)
+// and emits mutations for any changes.
+func (p *githubRepoPoller) syncReactionsOnIssue(ctx context.Context, issueNum int32) error {
+	owner, repo := p.gr.id.Owner, p.gr.id.Repo
+	p.logf("syncing reactions on issue %d", issueNum)
+
+	// Fetch issue-body reactions.
+	var allIssueReactions []*github.Reaction
+	opt := &github.ListOptions{PerPage: 100}
+	for {
+		reactions, res, err := p.githubDirect.Reactions.ListIssueReactions(ctx, owner, repo, int(issueNum), &github.ListReactionOptions{ListOptions: *opt})
+		if err != nil {
+			return fmt.Errorf("listing reactions on issue %d: %w", issueNum, err)
+		}
+		allIssueReactions = append(allIssueReactions, reactions...)
+		if res.NextPage == 0 {
+			break
+		}
+		opt.Page = res.NextPage
+	}
+
+	p.c.mu.RLock()
+	gi := p.gr.issues[issueNum]
+	if gi == nil {
+		p.c.mu.RUnlock()
+		return nil
+	}
+
+	mut := &maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  owner,
+			Repo:   repo,
+			Number: issueNum,
+		},
+	}
+
+	// Diff issue-body reactions.
+	seen := make(map[int64]bool)
+	for _, r := range allIssueReactions {
+		seen[r.GetID()] = true
+		if _, ok := gi.reactions[r.GetID()]; !ok {
+			mut.GithubIssue.Reaction = append(mut.GithubIssue.Reaction, githubReactionToProto(r))
+		}
+	}
+	for id := range gi.reactions {
+		if !seen[id] {
+			mut.GithubIssue.RemovedReactionId = append(mut.GithubIssue.RemovedReactionId, id)
+		}
+	}
+
+	// Fetch and diff comment reactions.
+	for cid, gc := range gi.comments {
+		var allCommentReactions []*github.Reaction
+		copt := &github.ListOptions{PerPage: 100}
+		for {
+			reactions, res, err := p.githubDirect.Reactions.ListIssueCommentReactions(ctx, owner, repo, cid, &github.ListReactionOptions{ListOptions: *copt})
+			if err != nil {
+				p.c.mu.RUnlock()
+				return fmt.Errorf("listing reactions on comment %d: %w", cid, err)
+			}
+			allCommentReactions = append(allCommentReactions, reactions...)
+			if res.NextPage == 0 {
+				break
+			}
+			copt.Page = res.NextPage
+		}
+
+		cseen := make(map[int64]bool)
+		var cmut *maintpb.GithubIssueCommentMutation
+		for _, r := range allCommentReactions {
+			cseen[r.GetID()] = true
+			if _, ok := gc.reactions[r.GetID()]; !ok {
+				if cmut == nil {
+					cmut = &maintpb.GithubIssueCommentMutation{Id: cid}
+				}
+				cmut.Reaction = append(cmut.Reaction, githubReactionToProto(r))
+			}
+		}
+		for id := range gc.reactions {
+			if !cseen[id] {
+				if cmut == nil {
+					cmut = &maintpb.GithubIssueCommentMutation{Id: cid}
+				}
+				cmut.RemovedReactionId = append(cmut.RemovedReactionId, id)
+			}
+		}
+		if cmut != nil {
+			mut.GithubIssue.Comment = append(mut.GithubIssue.Comment, cmut)
+		}
+	}
+	p.c.mu.RUnlock()
+
+	// Only emit if there are actual changes.
+	hasChanges := len(mut.GithubIssue.Reaction) > 0 ||
+		len(mut.GithubIssue.RemovedReactionId) > 0 ||
+		len(mut.GithubIssue.Comment) > 0
+	// Always set reaction_status to record that we synced.
+	mut.GithubIssue.ReactionStatus = &maintpb.GithubIssueSyncStatus{
+		ServerDate: timestamppb.Now(),
+	}
+	if hasChanges || gi.reactionsSyncedAsOf.IsZero() {
+		p.c.addMutation(mut)
+	}
+	return nil
+}
+
+func githubReactionToProto(r *github.Reaction) *maintpb.GithubReaction {
+	gr := &maintpb.GithubReaction{
+		Id:      r.GetID(),
+		Content: r.GetContent(),
+	}
+	if r.User != nil {
+		gr.UserId = r.User.GetID()
+	}
+	if r.CreatedAt != nil {
+		gr.Created = timestamppb.New(r.CreatedAt.Time)
+	}
+	return gr
 }
 
 func (p *githubRepoPoller) issueNumbersWithStaleEventSync() (issueNums []int32) {

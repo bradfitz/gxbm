@@ -28,11 +28,12 @@ import (
 
 // Corpus holds all of a project's metadata.
 type Corpus struct {
-	mutationLogger MutationLogger // non-nil when this is a self-updating corpus
-	mutationSource MutationSource // from Initialize
-	verbose        bool
-	dataDir        string
-	sawErrSplit    bool
+	mutationLogger       MutationLogger // non-nil when this is a self-updating corpus
+	mutationSource       MutationSource // from Initialize
+	verbose              bool
+	dataDir              string
+	sawErrSplit          bool
+	reactionScanInterval time.Duration // if >0, enable GraphQL reaction scanning
 
 	mu sync.RWMutex // guards all following fields
 	// corpus state:
@@ -90,6 +91,22 @@ func (c *Corpus) EnableLeaderMode(logger MutationLogger, scratchDir string) {
 
 // SetVerbose enables or disables verbose logging.
 func (c *Corpus) SetVerbose(v bool) { c.verbose = v }
+
+// EnableReactionScanning enables periodic scanning for reaction changes
+// using the GitHub GraphQL API. This is necessary to detect reactions on
+// issues that have no other activity, because GitHub does not update an
+// issue's or comment's UpdatedAt timestamp when reactions are added or
+// removed. Without this, reactions are only captured opportunistically
+// when an issue is re-synced for another reason (e.g. comment edit,
+// label change).
+//
+// The interval controls how often the full count scan runs. A reasonable
+// default is 24 hours. Each scan pages through all issues via GraphQL
+// (~100 per request) to compare reaction counts, then fetches detailed
+// reactions only for issues where counts diverge.
+func (c *Corpus) EnableReactionScanning(interval time.Duration) {
+	c.reactionScanInterval = interval
+}
 
 func (c *Corpus) getDataDir() string {
 	if c.dataDir == "" {

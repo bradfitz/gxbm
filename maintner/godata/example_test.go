@@ -6,17 +6,20 @@ package godata_test
 
 import (
 	"context"
-	"fmt"
-	"log"
+	"os"
+	"testing"
 
 	"github.com/bradfitz/gxbm/maintner"
 	"github.com/bradfitz/gxbm/maintner/godata"
 )
 
-func ExampleGet_numComments() {
+func TestGet_numComments(t *testing.T) {
+	if os.Getenv("TEST_GODATA") == "" {
+		t.Skip("skipping test requiring large download; set TEST_GODATA=1 to enable")
+	}
 	corpus, err := godata.Get(context.Background())
 	if err != nil {
-		log.Fatal(err)
+		t.Fatal(err)
 	}
 	num := 0
 	corpus.GitHub().ForeachRepo(func(gr *maintner.GitHubRepo) error {
@@ -27,5 +30,5 @@ func ExampleGet_numComments() {
 			})
 		})
 	})
-	fmt.Printf("%d GitHub comments on Go repos.\n", num)
+	t.Logf("%d GitHub comments on Go repos.", num)
 }

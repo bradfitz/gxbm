@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -463,8 +464,8 @@ var (
 )
 
 func getGoData(tb testing.TB) *maintner.Corpus {
-	if testing.Short() {
-		tb.Skip("skipping test requiring large download in short mode")
+	if os.Getenv("TEST_GODATA") == "" {
+		tb.Skip("skipping test requiring large download; set TEST_GODATA=1 to enable")
 	}
 	corpusMu.Lock()
 	defer corpusMu.Unlock()

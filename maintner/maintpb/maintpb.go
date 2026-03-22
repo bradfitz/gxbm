@@ -4,12 +4,4 @@
 
 package maintpb
 
-// Run "go generate" in this directory to update. You need to:
-//
-// - have the protoc binary in your $PATH
-// - go get grpc-codegen.go4.org/protoc-gen-go4grpc
-//
-// See https://github.com/golang/protobuf#installation for how to install
-// the protoc binary.
-
-//go:generate protoc --proto_path=$GOPATH/src:. --go4grpc_out=plugins=grpc:. maintner.proto
+//go:generate go run github.com/bufbuild/buf/cmd/buf generate

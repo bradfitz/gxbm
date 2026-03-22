@@ -1315,7 +1315,9 @@ type GitMutation struct {
 	Repo  *GitRepo               `protobuf:"bytes,1,opt,name=repo,proto3" json:"repo,omitempty"`
 	// commit adds a commit, or adds new information to a commit if fields
 	// are added in the future.
-	Commit        *GitCommit `protobuf:"bytes,2,opt,name=commit,proto3" json:"commit,omitempty"`
+	Commit *GitCommit `protobuf:"bytes,2,opt,name=commit,proto3" json:"commit,omitempty"`
+	// ref_update records that a ref now points to a given hash.
+	RefUpdate     *GitRef `protobuf:"bytes,3,opt,name=ref_update,json=refUpdate,proto3" json:"ref_update,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1360,6 +1362,13 @@ func (x *GitMutation) GetRepo() *GitRepo {
 func (x *GitMutation) GetCommit() *GitCommit {
 	if x != nil {
 		return x.Commit
+	}
+	return nil
+}
+
+func (x *GitMutation) GetRefUpdate() *GitRef {
+	if x != nil {
+		return x.RefUpdate
 	}
 	return nil
 }
@@ -1850,10 +1859,12 @@ const file_maintner_proto_rawDesc = "" +
 	"\n" +
 	"GithubTeam\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x12\n" +
-	"\x04slug\x18\x02 \x01(\tR\x04slug\"_\n" +
+	"\x04slug\x18\x02 \x01(\tR\x04slug\"\x8f\x01\n" +
 	"\vGitMutation\x12$\n" +
 	"\x04repo\x18\x01 \x01(\v2\x10.maintpb.GitRepoR\x04repo\x12*\n" +
-	"\x06commit\x18\x02 \x01(\v2\x12.maintpb.GitCommitR\x06commit\"6\n" +
+	"\x06commit\x18\x02 \x01(\v2\x12.maintpb.GitCommitR\x06commit\x12.\n" +
+	"\n" +
+	"ref_update\x18\x03 \x01(\v2\x0f.maintpb.GitRefR\trefUpdate\"6\n" +
 	"\aGitRepo\x12\x17\n" +
 	"\ago_repo\x18\x01 \x01(\tR\x06goRepo\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\"d\n" +
@@ -1952,15 +1963,16 @@ var file_maintner_proto_depIdxs = []int32{
 	22, // 33: maintpb.GithubIssueCommentMutation.updated:type_name -> google.protobuf.Timestamp
 	16, // 34: maintpb.GitMutation.repo:type_name -> maintpb.GitRepo
 	17, // 35: maintpb.GitMutation.commit:type_name -> maintpb.GitCommit
-	18, // 36: maintpb.GitCommit.diff_tree:type_name -> maintpb.GitDiffTree
-	19, // 37: maintpb.GitDiffTree.file:type_name -> maintpb.GitDiffTreeFile
-	17, // 38: maintpb.GerritMutation.commits:type_name -> maintpb.GitCommit
-	21, // 39: maintpb.GerritMutation.refs:type_name -> maintpb.GitRef
-	40, // [40:40] is the sub-list for method output_type
-	40, // [40:40] is the sub-list for method input_type
-	40, // [40:40] is the sub-list for extension type_name
-	40, // [40:40] is the sub-list for extension extendee
-	0,  // [0:40] is the sub-list for field type_name
+	21, // 36: maintpb.GitMutation.ref_update:type_name -> maintpb.GitRef
+	18, // 37: maintpb.GitCommit.diff_tree:type_name -> maintpb.GitDiffTree
+	19, // 38: maintpb.GitDiffTree.file:type_name -> maintpb.GitDiffTreeFile
+	17, // 39: maintpb.GerritMutation.commits:type_name -> maintpb.GitCommit
+	21, // 40: maintpb.GerritMutation.refs:type_name -> maintpb.GitRef
+	41, // [41:41] is the sub-list for method output_type
+	41, // [41:41] is the sub-list for method input_type
+	41, // [41:41] is the sub-list for extension type_name
+	41, // [41:41] is the sub-list for extension extendee
+	0,  // [0:41] is the sub-list for field type_name
 }
 
 func init() { file_maintner_proto_init() }

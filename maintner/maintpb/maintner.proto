@@ -235,6 +235,9 @@ message GitMutation {
   // commit adds a commit, or adds new information to a commit if fields
   // are added in the future.
   GitCommit commit = 2;
+
+  // ref_update records that a ref now points to a given hash.
+  GitRef ref_update = 3;
 }
 
 // GitRepo identifies a git repo being mutated.

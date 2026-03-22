@@ -336,20 +336,41 @@ func (c *Corpus) indexCommit(conf polledGitCommits, hash GitHash) error {
 
 // c.mu is held for writing.
 func (c *Corpus) processGitMutation(m *maintpb.GitMutation) {
-	commit := m.Commit
-	if commit == nil {
-		return
-	}
-	gc, err := c.processGitCommit(commit)
-	if err != nil {
-		return
-	}
-	if gc.Repo == "" && m.Repo != nil {
+	var repoName string
+	if m.Repo != nil {
 		if m.Repo.Name != "" {
-			gc.Repo = m.Repo.Name
+			repoName = m.Repo.Name
 		} else if m.Repo.GoRepo != "" {
-			gc.Repo = m.Repo.GoRepo
+			repoName = m.Repo.GoRepo
 		}
+	}
+	if repoName != "" {
+		if c.gitRepos == nil {
+			c.gitRepos = make(map[string]bool)
+		}
+		c.gitRepos[repoName] = true
+	}
+
+	if commit := m.Commit; commit != nil {
+		gc, err := c.processGitCommit(commit)
+		if err != nil {
+			return
+		}
+		if gc.Repo == "" && repoName != "" {
+			gc.Repo = repoName
+		}
+	}
+
+	if ru := m.RefUpdate; ru != nil && repoName != "" {
+		if c.gitRefs == nil {
+			c.gitRefs = make(map[string]map[string]GitHash)
+		}
+		refs := c.gitRefs[repoName]
+		if refs == nil {
+			refs = make(map[string]GitHash)
+			c.gitRefs[repoName] = refs
+		}
+		refs[ru.Ref] = c.gitHashFromHexStr(ru.Sha1)
 	}
 }
 
@@ -454,7 +475,7 @@ func (c *Corpus) processGitCommit(commit *maintpb.GitCommit) (*GitCommit, error)
 			// non-ASCII.
 			return nil
 		}
-		log.Printf("in commit %s, unrecognized line %q", hash, ln)
+		// Ignore unrecognized header lines (e.g. change-id trailers).
 		return nil
 	})
 	if err != nil {
@@ -663,9 +684,12 @@ func (c *Corpus) syncGitRepoOnce(ctx context.Context, ws *watchedGitRepoState, d
 			continue
 		}
 
-		// 3. Compare against known refs
+		// 3. Compare against known refs from mutation log
 		c.mu.RLock()
-		knownHash := ws.knownRefs[refName]
+		var knownHash GitHash
+		if refs := c.gitRefs[ws.conf.Name]; refs != nil {
+			knownHash = refs[refName]
+		}
 		c.mu.RUnlock()
 
 		newHash := GitHash(mustDecodeHex(hash))
@@ -690,17 +714,16 @@ func (c *Corpus) syncGitRepoOnce(ctx context.Context, ws *watchedGitRepoState, d
 		return fmt.Errorf("git fetch: %v\n%s", err, out)
 	}
 
-	// 5. Lock corpus, enqueue tips, update knownRefs
+	// 5. Lock corpus, enqueue commit tips
+	repo := &maintpb.GitRepo{Name: ws.conf.Name}
 	c.mu.Lock()
 	for _, u := range updates {
 		h := c.gitHashFromHexStr(u.hash)
 		c.enqueueCommitLocked(h)
-		ws.knownRefs[u.name] = h
 	}
 	c.mu.Unlock()
 
 	// 6. Walk commit graph: index all queued commits
-	repo := &maintpb.GitRepo{Name: ws.conf.Name}
 	conf := polledGitCommits{repo: repo, dir: dir}
 	indexed := 0
 	for {
@@ -718,6 +741,19 @@ func (c *Corpus) syncGitRepoOnce(ctx context.Context, ws *watchedGitRepoState, d
 	}
 	if indexed > 0 {
 		log.Printf("Indexed %d new git commits for %s", indexed, ws.conf.Name)
+	}
+
+	// 7. Emit ref update mutations (after commits are indexed)
+	for _, u := range updates {
+		c.addMutation(&maintpb.Mutation{
+			Git: &maintpb.GitMutation{
+				Repo: repo,
+				RefUpdate: &maintpb.GitRef{
+					Ref:  u.name,
+					Sha1: u.hash,
+				},
+			},
+		})
 	}
 	return nil
 }

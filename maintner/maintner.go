@@ -56,7 +56,9 @@ type Corpus struct {
 	watchedGitRepoConfigs []watchedGitRepoState
 	gitPeople             map[string]*GitPerson
 	gitCommit             map[GitHash]*GitCommit
-	gitCommitTodo         map[GitHash]bool          // -> true
+	gitRepos              map[string]bool             // repo names seen in git mutations
+	gitRefs               map[string]map[string]GitHash // repo name -> ref name -> hash
+	gitCommitTodo         map[GitHash]bool           // -> true
 	gitOfHg               map[string]GitHash        // hg hex hash -> git hash
 	zoneCache             map[string]*time.Location // "+0530" => location
 }
@@ -201,7 +203,6 @@ type WatchedGitRepo struct {
 type watchedGitRepoState struct {
 	conf       WatchedGitRepo
 	refRegexps []*regexp.Regexp
-	knownRefs  map[string]GitHash // ref name -> last known hash
 }
 
 func (ws *watchedGitRepoState) matchesRef(refName string) bool {
@@ -238,8 +239,7 @@ func (c *Corpus) TrackGitRepo(conf WatchedGitRepo) {
 		conf.PollInterval = 30 * time.Second
 	}
 	ws := watchedGitRepoState{
-		conf:      conf,
-		knownRefs: make(map[string]GitHash),
+		conf: conf,
 	}
 	for _, pat := range conf.RefRegexps {
 		re, err := regexp.Compile(pat)
@@ -519,6 +519,24 @@ type GitRefInfo struct {
 	Hash GitHash // current hash
 }
 
+// GitRepos returns the set of git repo names seen in the corpus.
+func (c *Corpus) GitRepos() []string {
+	repos := make([]string, 0, len(c.gitRepos))
+	for name := range c.gitRepos {
+		repos = append(repos, name)
+	}
+	return repos
+}
+
+// GitRef returns the commit hash for a given repo and ref name, or
+// the zero GitHash if not known.
+func (c *Corpus) GitRef(repoName, refName string) GitHash {
+	if refs := c.gitRefs[repoName]; refs != nil {
+		return refs[refName]
+	}
+	return ""
+}
+
 // ForeachGitCommit calls fn for each git commit in the corpus.
 // Placeholder commits (with no committer) are skipped.
 // If fn returns an error, iteration stops and that error is returned.
@@ -554,10 +572,9 @@ func (c *Corpus) ForeachGitCommitForRepo(repoName string, fn func(*GitCommit) er
 
 // ForeachGitRef calls fn for each tracked git ref across all watched repos.
 func (c *Corpus) ForeachGitRef(fn func(GitRefInfo) error) error {
-	for i := range c.watchedGitRepoConfigs {
-		ws := &c.watchedGitRepoConfigs[i]
-		for ref, hash := range ws.knownRefs {
-			if err := fn(GitRefInfo{Repo: ws.conf.Name, Ref: ref, Hash: hash}); err != nil {
+	for repo, refs := range c.gitRefs {
+		for ref, hash := range refs {
+			if err := fn(GitRefInfo{Repo: repo, Ref: ref, Hash: hash}); err != nil {
 				return err
 			}
 		}
@@ -567,15 +584,9 @@ func (c *Corpus) ForeachGitRef(fn func(GitRefInfo) error) error {
 
 // ForeachGitRepoRef calls fn for each tracked git ref in the named repo.
 func (c *Corpus) ForeachGitRepoRef(repoName string, fn func(GitRefInfo) error) error {
-	for i := range c.watchedGitRepoConfigs {
-		ws := &c.watchedGitRepoConfigs[i]
-		if ws.conf.Name != repoName {
-			continue
-		}
-		for ref, hash := range ws.knownRefs {
-			if err := fn(GitRefInfo{Repo: ws.conf.Name, Ref: ref, Hash: hash}); err != nil {
-				return err
-			}
+	for ref, hash := range c.gitRefs[repoName] {
+		if err := fn(GitRefInfo{Repo: repoName, Ref: ref, Hash: hash}); err != nil {
+			return err
 		}
 	}
 	return nil

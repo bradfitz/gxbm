@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"reflect"
 	"testing"
+	"testing/synctest"
 )
 
 func TestSumSegSize(t *testing.T) {
@@ -314,70 +315,72 @@ func TestGetNewSegments(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			serverSegCalls := 0
-			syncSegCalls := 0
-			ns := &netMutSource{
-				last: tt.lastSegs,
-				testHookGetServerSegments: func(_ context.Context, waitSizeNot int64) (segs []LogSegmentJSON, err error) {
-					serverSegCalls++
-					if serverSegCalls%2 == 1 {
-						return nil, fetchError{PossiblyRetryable: true, Err: fmt.Errorf("fake error to simulate the internet saying 'not this time' every now and then")}
-					}
-					if len(tt.serverSegs) == 0 {
-						return nil, nil
-					}
-					segs = tt.serverSegs[0]
-					if len(tt.serverSegs) > 1 {
-						tt.serverSegs = tt.serverSegs[1:]
-					}
-					return segs, nil
-				},
-				testHookSyncSeg: func(_ context.Context, seg LogSegmentJSON) (fileSeg, []byte, error) {
-					syncSegCalls++
-					if syncSegCalls%3 == 1 {
-						return fileSeg{}, nil, fetchError{PossiblyRetryable: true, Err: fmt.Errorf("fake error to simulate the internet saying 'not this time' every now and then")}
-					}
-					return fileSeg{
-						seg:    seg.Number,
-						size:   seg.Size,
-						sha224: seg.SHA224,
-						file:   fmt.Sprintf("/fake/%04d.mutlog", seg.Number),
-					}, nil, nil
-				},
-				testHookOnSplit: func(sumCommon int64) {
-					if got, want := sumCommon, tt.wantSumCommon; got != want {
-						t.Errorf("sumCommon = %v; want %v", got, want)
-					}
-				},
-				testHookFilePrefixSum224: func(file string, n int64) string {
-					if tt.prefixSum != "" {
-						return tt.prefixSum
-					}
-					t.Errorf("unexpected call to filePrefixSum224(%q, %d)", file, n)
-					return "XXXX"
-				},
-			}
-			got, err := ns.getNewSegments(context.Background())
-			if tt.wantSplit {
-				if err != ErrSplit {
-					t.Fatalf("wanted ErrSplit; got %+v, %v", got, err)
+			synctest.Test(t, func(t *testing.T) {
+				serverSegCalls := 0
+				syncSegCalls := 0
+				ns := &netMutSource{
+					last: tt.lastSegs,
+					testHookGetServerSegments: func(_ context.Context, waitSizeNot int64) (segs []LogSegmentJSON, err error) {
+						serverSegCalls++
+						if serverSegCalls%2 == 1 {
+							return nil, fetchError{PossiblyRetryable: true, Err: fmt.Errorf("fake error to simulate the internet saying 'not this time' every now and then")}
+						}
+						if len(tt.serverSegs) == 0 {
+							return nil, nil
+						}
+						segs = tt.serverSegs[0]
+						if len(tt.serverSegs) > 1 {
+							tt.serverSegs = tt.serverSegs[1:]
+						}
+						return segs, nil
+					},
+					testHookSyncSeg: func(_ context.Context, seg LogSegmentJSON) (fileSeg, []byte, error) {
+						syncSegCalls++
+						if syncSegCalls%3 == 1 {
+							return fileSeg{}, nil, fetchError{PossiblyRetryable: true, Err: fmt.Errorf("fake error to simulate the internet saying 'not this time' every now and then")}
+						}
+						return fileSeg{
+							seg:    seg.Number,
+							size:   seg.Size,
+							sha224: seg.SHA224,
+							file:   fmt.Sprintf("/fake/%04d.mutlog", seg.Number),
+						}, nil, nil
+					},
+					testHookOnSplit: func(sumCommon int64) {
+						if got, want := sumCommon, tt.wantSumCommon; got != want {
+							t.Errorf("sumCommon = %v; want %v", got, want)
+						}
+					},
+					testHookFilePrefixSum224: func(file string, n int64) string {
+						if tt.prefixSum != "" {
+							return tt.prefixSum
+						}
+						t.Errorf("unexpected call to filePrefixSum224(%q, %d)", file, n)
+						return "XXXX"
+					},
 				}
-				// Success.
-				return
-			}
-			if tt.wantUnchanged {
-				if err == nil || err.Error() != "maintner.netsource: maintnerd server returned unchanged log segments" {
-					t.Fatalf("wanted unchanged; got %+v, %v", got, err)
+				got, err := ns.getNewSegments(context.Background())
+				if tt.wantSplit {
+					if err != ErrSplit {
+						t.Fatalf("wanted ErrSplit; got %+v, %v", got, err)
+					}
+					// Success.
+					return
 				}
-				// Success.
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("mismatch\n got: %+v\nwant: %+v\n", got, tt.want)
-			}
+				if tt.wantUnchanged {
+					if err == nil || err.Error() != "maintner.netsource: maintnerd server returned unchanged log segments" {
+						t.Fatalf("wanted unchanged; got %+v, %v", got, err)
+					}
+					// Success.
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(got, tt.want) {
+					t.Errorf("mismatch\n got: %+v\nwant: %+v\n", got, tt.want)
+				}
+			})
 		})
 	}
 }

@@ -212,8 +212,17 @@ type GithubIssueMutation struct {
 	Reaction          []*GithubReaction             `protobuf:"bytes,32,rep,name=reaction,proto3" json:"reaction,omitempty"`                                                      // reactions on the issue body
 	RemovedReactionId []int64                       `protobuf:"varint,33,rep,packed,name=removed_reaction_id,json=removedReactionId,proto3" json:"removed_reaction_id,omitempty"` // reaction IDs removed from the issue body
 	ReactionStatus    *GithubIssueSyncStatus        `protobuf:"bytes,34,opt,name=reaction_status,json=reactionStatus,proto3" json:"reaction_status,omitempty"`                    // sync cursor for reactions
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// PR-specific fields. Only set when pull_request is true.
+	Draft           *BoolChange              `protobuf:"bytes,35,opt,name=draft,proto3" json:"draft,omitempty"`
+	Merged          *BoolChange              `protobuf:"bytes,36,opt,name=merged,proto3" json:"merged,omitempty"`
+	MergedAt        *timestamppb.Timestamp   `protobuf:"bytes,37,opt,name=merged_at,json=mergedAt,proto3" json:"merged_at,omitempty"`
+	MergedBy        *GithubUser              `protobuf:"bytes,38,opt,name=merged_by,json=mergedBy,proto3" json:"merged_by,omitempty"`
+	MergeCommitHash string                   `protobuf:"bytes,39,opt,name=merge_commit_hash,json=mergeCommitHash,proto3" json:"merge_commit_hash,omitempty"`
+	Head            *GithubPullRequestBranch `protobuf:"bytes,40,opt,name=head,proto3" json:"head,omitempty"`                                             // source branch
+	Base            *GithubPullRequestBranch `protobuf:"bytes,41,opt,name=base,proto3" json:"base,omitempty"`                                             // target branch
+	PrDetailStatus  *GithubIssueSyncStatus   `protobuf:"bytes,42,opt,name=pr_detail_status,json=prDetailStatus,proto3" json:"pr_detail_status,omitempty"` // sync cursor for PR detail fetch
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *GithubIssueMutation) Reset() {
@@ -473,6 +482,62 @@ func (x *GithubIssueMutation) GetRemovedReactionId() []int64 {
 func (x *GithubIssueMutation) GetReactionStatus() *GithubIssueSyncStatus {
 	if x != nil {
 		return x.ReactionStatus
+	}
+	return nil
+}
+
+func (x *GithubIssueMutation) GetDraft() *BoolChange {
+	if x != nil {
+		return x.Draft
+	}
+	return nil
+}
+
+func (x *GithubIssueMutation) GetMerged() *BoolChange {
+	if x != nil {
+		return x.Merged
+	}
+	return nil
+}
+
+func (x *GithubIssueMutation) GetMergedAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.MergedAt
+	}
+	return nil
+}
+
+func (x *GithubIssueMutation) GetMergedBy() *GithubUser {
+	if x != nil {
+		return x.MergedBy
+	}
+	return nil
+}
+
+func (x *GithubIssueMutation) GetMergeCommitHash() string {
+	if x != nil {
+		return x.MergeCommitHash
+	}
+	return ""
+}
+
+func (x *GithubIssueMutation) GetHead() *GithubPullRequestBranch {
+	if x != nil {
+		return x.Head
+	}
+	return nil
+}
+
+func (x *GithubIssueMutation) GetBase() *GithubPullRequestBranch {
+	if x != nil {
+		return x.Base
+	}
+	return nil
+}
+
+func (x *GithubIssueMutation) GetPrDetailStatus() *GithubIssueSyncStatus {
+	if x != nil {
+		return x.PrDetailStatus
 	}
 	return nil
 }
@@ -1418,6 +1483,75 @@ func (x *GithubTeam) GetSlug() string {
 	return ""
 }
 
+// GithubPullRequestBranch identifies a branch in a pull request (head or base).
+type GithubPullRequestBranch struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Ref           string                 `protobuf:"bytes,1,opt,name=ref,proto3" json:"ref,omitempty"`     // branch name, e.g. "main" or "feature-x"
+	Hash          string                 `protobuf:"bytes,2,opt,name=hash,proto3" json:"hash,omitempty"`   // commit SHA
+	Owner         string                 `protobuf:"bytes,3,opt,name=owner,proto3" json:"owner,omitempty"` // repo owner (may differ from issue owner for fork PRs)
+	Repo          string                 `protobuf:"bytes,4,opt,name=repo,proto3" json:"repo,omitempty"`   // repo name
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GithubPullRequestBranch) Reset() {
+	*x = GithubPullRequestBranch{}
+	mi := &file_maintner_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GithubPullRequestBranch) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GithubPullRequestBranch) ProtoMessage() {}
+
+func (x *GithubPullRequestBranch) ProtoReflect() protoreflect.Message {
+	mi := &file_maintner_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GithubPullRequestBranch.ProtoReflect.Descriptor instead.
+func (*GithubPullRequestBranch) Descriptor() ([]byte, []int) {
+	return file_maintner_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *GithubPullRequestBranch) GetRef() string {
+	if x != nil {
+		return x.Ref
+	}
+	return ""
+}
+
+func (x *GithubPullRequestBranch) GetHash() string {
+	if x != nil {
+		return x.Hash
+	}
+	return ""
+}
+
+func (x *GithubPullRequestBranch) GetOwner() string {
+	if x != nil {
+		return x.Owner
+	}
+	return ""
+}
+
+func (x *GithubPullRequestBranch) GetRepo() string {
+	if x != nil {
+		return x.Repo
+	}
+	return ""
+}
+
 type GitMutation struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Repo  *GitRepo               `protobuf:"bytes,1,opt,name=repo,proto3" json:"repo,omitempty"`
@@ -1434,7 +1568,7 @@ type GitMutation struct {
 
 func (x *GitMutation) Reset() {
 	*x = GitMutation{}
-	mi := &file_maintner_proto_msgTypes[16]
+	mi := &file_maintner_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1446,7 +1580,7 @@ func (x *GitMutation) String() string {
 func (*GitMutation) ProtoMessage() {}
 
 func (x *GitMutation) ProtoReflect() protoreflect.Message {
-	mi := &file_maintner_proto_msgTypes[16]
+	mi := &file_maintner_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1459,7 +1593,7 @@ func (x *GitMutation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GitMutation.ProtoReflect.Descriptor instead.
 func (*GitMutation) Descriptor() ([]byte, []int) {
-	return file_maintner_proto_rawDescGZIP(), []int{16}
+	return file_maintner_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *GitMutation) GetRepo() *GitRepo {
@@ -1504,7 +1638,7 @@ type GitRepo struct {
 
 func (x *GitRepo) Reset() {
 	*x = GitRepo{}
-	mi := &file_maintner_proto_msgTypes[17]
+	mi := &file_maintner_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1516,7 +1650,7 @@ func (x *GitRepo) String() string {
 func (*GitRepo) ProtoMessage() {}
 
 func (x *GitRepo) ProtoReflect() protoreflect.Message {
-	mi := &file_maintner_proto_msgTypes[17]
+	mi := &file_maintner_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1529,7 +1663,7 @@ func (x *GitRepo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GitRepo.ProtoReflect.Descriptor instead.
 func (*GitRepo) Descriptor() ([]byte, []int) {
-	return file_maintner_proto_rawDescGZIP(), []int{17}
+	return file_maintner_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *GitRepo) GetGoRepo() string {
@@ -1560,7 +1694,7 @@ type GitCommit struct {
 
 func (x *GitCommit) Reset() {
 	*x = GitCommit{}
-	mi := &file_maintner_proto_msgTypes[18]
+	mi := &file_maintner_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1572,7 +1706,7 @@ func (x *GitCommit) String() string {
 func (*GitCommit) ProtoMessage() {}
 
 func (x *GitCommit) ProtoReflect() protoreflect.Message {
-	mi := &file_maintner_proto_msgTypes[18]
+	mi := &file_maintner_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1585,7 +1719,7 @@ func (x *GitCommit) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GitCommit.ProtoReflect.Descriptor instead.
 func (*GitCommit) Descriptor() ([]byte, []int) {
-	return file_maintner_proto_rawDescGZIP(), []int{18}
+	return file_maintner_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *GitCommit) GetHash() string {
@@ -1619,7 +1753,7 @@ type GitDiffTree struct {
 
 func (x *GitDiffTree) Reset() {
 	*x = GitDiffTree{}
-	mi := &file_maintner_proto_msgTypes[19]
+	mi := &file_maintner_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1631,7 +1765,7 @@ func (x *GitDiffTree) String() string {
 func (*GitDiffTree) ProtoMessage() {}
 
 func (x *GitDiffTree) ProtoReflect() protoreflect.Message {
-	mi := &file_maintner_proto_msgTypes[19]
+	mi := &file_maintner_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1644,7 +1778,7 @@ func (x *GitDiffTree) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GitDiffTree.ProtoReflect.Descriptor instead.
 func (*GitDiffTree) Descriptor() ([]byte, []int) {
-	return file_maintner_proto_rawDescGZIP(), []int{19}
+	return file_maintner_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *GitDiffTree) GetFile() []*GitDiffTreeFile {
@@ -1667,7 +1801,7 @@ type GitDiffTreeFile struct {
 
 func (x *GitDiffTreeFile) Reset() {
 	*x = GitDiffTreeFile{}
-	mi := &file_maintner_proto_msgTypes[20]
+	mi := &file_maintner_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1679,7 +1813,7 @@ func (x *GitDiffTreeFile) String() string {
 func (*GitDiffTreeFile) ProtoMessage() {}
 
 func (x *GitDiffTreeFile) ProtoReflect() protoreflect.Message {
-	mi := &file_maintner_proto_msgTypes[20]
+	mi := &file_maintner_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1692,7 +1826,7 @@ func (x *GitDiffTreeFile) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GitDiffTreeFile.ProtoReflect.Descriptor instead.
 func (*GitDiffTreeFile) Descriptor() ([]byte, []int) {
-	return file_maintner_proto_rawDescGZIP(), []int{20}
+	return file_maintner_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *GitDiffTreeFile) GetFile() string {
@@ -1749,7 +1883,7 @@ type GitTag struct {
 
 func (x *GitTag) Reset() {
 	*x = GitTag{}
-	mi := &file_maintner_proto_msgTypes[21]
+	mi := &file_maintner_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1761,7 +1895,7 @@ func (x *GitTag) String() string {
 func (*GitTag) ProtoMessage() {}
 
 func (x *GitTag) ProtoReflect() protoreflect.Message {
-	mi := &file_maintner_proto_msgTypes[21]
+	mi := &file_maintner_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1774,7 +1908,7 @@ func (x *GitTag) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GitTag.ProtoReflect.Descriptor instead.
 func (*GitTag) Descriptor() ([]byte, []int) {
-	return file_maintner_proto_rawDescGZIP(), []int{21}
+	return file_maintner_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *GitTag) GetHash() string {
@@ -1815,7 +1949,7 @@ type GerritMutation struct {
 
 func (x *GerritMutation) Reset() {
 	*x = GerritMutation{}
-	mi := &file_maintner_proto_msgTypes[22]
+	mi := &file_maintner_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1827,7 +1961,7 @@ func (x *GerritMutation) String() string {
 func (*GerritMutation) ProtoMessage() {}
 
 func (x *GerritMutation) ProtoReflect() protoreflect.Message {
-	mi := &file_maintner_proto_msgTypes[22]
+	mi := &file_maintner_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1840,7 +1974,7 @@ func (x *GerritMutation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GerritMutation.ProtoReflect.Descriptor instead.
 func (*GerritMutation) Descriptor() ([]byte, []int) {
-	return file_maintner_proto_rawDescGZIP(), []int{22}
+	return file_maintner_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *GerritMutation) GetProject() string {
@@ -1890,7 +2024,7 @@ type GitRef struct {
 
 func (x *GitRef) Reset() {
 	*x = GitRef{}
-	mi := &file_maintner_proto_msgTypes[23]
+	mi := &file_maintner_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1902,7 +2036,7 @@ func (x *GitRef) String() string {
 func (*GitRef) ProtoMessage() {}
 
 func (x *GitRef) ProtoReflect() protoreflect.Message {
-	mi := &file_maintner_proto_msgTypes[23]
+	mi := &file_maintner_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1915,7 +2049,7 @@ func (x *GitRef) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GitRef.ProtoReflect.Descriptor instead.
 func (*GitRef) Descriptor() ([]byte, []int) {
-	return file_maintner_proto_rawDescGZIP(), []int{23}
+	return file_maintner_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *GitRef) GetRef() string {
@@ -1948,7 +2082,7 @@ const file_maintner_proto_rawDesc = "" +
 	"\x06labels\x18\x03 \x03(\v2\x14.maintpb.GithubLabelR\x06labels\x128\n" +
 	"\n" +
 	"milestones\x18\x04 \x03(\v2\x18.maintpb.GithubMilestoneR\n" +
-	"milestones\"\xc9\v\n" +
+	"milestones\"\xee\x0e\n" +
 	"\x13GithubIssueMutation\x12\x14\n" +
 	"\x05owner\x18\x01 \x01(\tR\x05owner\x12\x12\n" +
 	"\x04repo\x18\x02 \x01(\tR\x04repo\x12\x16\n" +
@@ -1984,7 +2118,15 @@ const file_maintner_proto_rawDesc = "" +
 	"\rreview_status\x18\x1e \x01(\v2\x1e.maintpb.GithubIssueSyncStatusR\freviewStatus\x123\n" +
 	"\breaction\x18  \x03(\v2\x17.maintpb.GithubReactionR\breaction\x12.\n" +
 	"\x13removed_reaction_id\x18! \x03(\x03R\x11removedReactionId\x12G\n" +
-	"\x0freaction_status\x18\" \x01(\v2\x1e.maintpb.GithubIssueSyncStatusR\x0ereactionStatus\"\x1e\n" +
+	"\x0freaction_status\x18\" \x01(\v2\x1e.maintpb.GithubIssueSyncStatusR\x0ereactionStatus\x12)\n" +
+	"\x05draft\x18# \x01(\v2\x13.maintpb.BoolChangeR\x05draft\x12+\n" +
+	"\x06merged\x18$ \x01(\v2\x13.maintpb.BoolChangeR\x06merged\x127\n" +
+	"\tmerged_at\x18% \x01(\v2\x1a.google.protobuf.TimestampR\bmergedAt\x120\n" +
+	"\tmerged_by\x18& \x01(\v2\x13.maintpb.GithubUserR\bmergedBy\x12*\n" +
+	"\x11merge_commit_hash\x18' \x01(\tR\x0fmergeCommitHash\x124\n" +
+	"\x04head\x18( \x01(\v2 .maintpb.GithubPullRequestBranchR\x04head\x124\n" +
+	"\x04base\x18) \x01(\v2 .maintpb.GithubPullRequestBranchR\x04base\x12H\n" +
+	"\x10pr_detail_status\x18* \x01(\v2\x1e.maintpb.GithubIssueSyncStatusR\x0eprDetailStatus\"\x1e\n" +
 	"\n" +
 	"BoolChange\x12\x10\n" +
 	"\x03val\x18\x01 \x01(\bR\x03val\" \n" +
@@ -2063,7 +2205,12 @@ const file_maintner_proto_rawDesc = "" +
 	"\n" +
 	"GithubTeam\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x12\n" +
-	"\x04slug\x18\x02 \x01(\tR\x04slug\"\xb2\x01\n" +
+	"\x04slug\x18\x02 \x01(\tR\x04slug\"i\n" +
+	"\x17GithubPullRequestBranch\x12\x10\n" +
+	"\x03ref\x18\x01 \x01(\tR\x03ref\x12\x12\n" +
+	"\x04hash\x18\x02 \x01(\tR\x04hash\x12\x14\n" +
+	"\x05owner\x18\x03 \x01(\tR\x05owner\x12\x12\n" +
+	"\x04repo\x18\x04 \x01(\tR\x04repo\"\xb2\x01\n" +
 	"\vGitMutation\x12$\n" +
 	"\x04repo\x18\x01 \x01(\v2\x10.maintpb.GitRepoR\x04repo\x12*\n" +
 	"\x06commit\x18\x02 \x01(\v2\x12.maintpb.GitCommitR\x06commit\x12.\n" +
@@ -2110,7 +2257,7 @@ func file_maintner_proto_rawDescGZIP() []byte {
 	return file_maintner_proto_rawDescData
 }
 
-var file_maintner_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
+var file_maintner_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
 var file_maintner_proto_goTypes = []any{
 	(*Mutation)(nil),                   // 0: maintpb.Mutation
 	(*GithubMutation)(nil),             // 1: maintpb.GithubMutation
@@ -2128,31 +2275,32 @@ var file_maintner_proto_goTypes = []any{
 	(*GithubUser)(nil),                 // 13: maintpb.GithubUser
 	(*GithubReaction)(nil),             // 14: maintpb.GithubReaction
 	(*GithubTeam)(nil),                 // 15: maintpb.GithubTeam
-	(*GitMutation)(nil),                // 16: maintpb.GitMutation
-	(*GitRepo)(nil),                    // 17: maintpb.GitRepo
-	(*GitCommit)(nil),                  // 18: maintpb.GitCommit
-	(*GitDiffTree)(nil),                // 19: maintpb.GitDiffTree
-	(*GitDiffTreeFile)(nil),            // 20: maintpb.GitDiffTreeFile
-	(*GitTag)(nil),                     // 21: maintpb.GitTag
-	(*GerritMutation)(nil),             // 22: maintpb.GerritMutation
-	(*GitRef)(nil),                     // 23: maintpb.GitRef
-	(*timestamppb.Timestamp)(nil),      // 24: google.protobuf.Timestamp
+	(*GithubPullRequestBranch)(nil),    // 16: maintpb.GithubPullRequestBranch
+	(*GitMutation)(nil),                // 17: maintpb.GitMutation
+	(*GitRepo)(nil),                    // 18: maintpb.GitRepo
+	(*GitCommit)(nil),                  // 19: maintpb.GitCommit
+	(*GitDiffTree)(nil),                // 20: maintpb.GitDiffTree
+	(*GitDiffTreeFile)(nil),            // 21: maintpb.GitDiffTreeFile
+	(*GitTag)(nil),                     // 22: maintpb.GitTag
+	(*GerritMutation)(nil),             // 23: maintpb.GerritMutation
+	(*GitRef)(nil),                     // 24: maintpb.GitRef
+	(*timestamppb.Timestamp)(nil),      // 25: google.protobuf.Timestamp
 }
 var file_maintner_proto_depIdxs = []int32{
 	2,  // 0: maintpb.Mutation.github_issue:type_name -> maintpb.GithubIssueMutation
 	1,  // 1: maintpb.Mutation.github:type_name -> maintpb.GithubMutation
-	16, // 2: maintpb.Mutation.git:type_name -> maintpb.GitMutation
-	22, // 3: maintpb.Mutation.gerrit:type_name -> maintpb.GerritMutation
+	17, // 2: maintpb.Mutation.git:type_name -> maintpb.GitMutation
+	23, // 3: maintpb.Mutation.gerrit:type_name -> maintpb.GerritMutation
 	5,  // 4: maintpb.GithubMutation.labels:type_name -> maintpb.GithubLabel
 	6,  // 5: maintpb.GithubMutation.milestones:type_name -> maintpb.GithubMilestone
 	13, // 6: maintpb.GithubIssueMutation.user:type_name -> maintpb.GithubUser
 	13, // 7: maintpb.GithubIssueMutation.assignees:type_name -> maintpb.GithubUser
-	24, // 8: maintpb.GithubIssueMutation.created:type_name -> google.protobuf.Timestamp
-	24, // 9: maintpb.GithubIssueMutation.updated:type_name -> google.protobuf.Timestamp
+	25, // 8: maintpb.GithubIssueMutation.created:type_name -> google.protobuf.Timestamp
+	25, // 9: maintpb.GithubIssueMutation.updated:type_name -> google.protobuf.Timestamp
 	4,  // 10: maintpb.GithubIssueMutation.body_change:type_name -> maintpb.StringChange
 	3,  // 11: maintpb.GithubIssueMutation.closed:type_name -> maintpb.BoolChange
 	3,  // 12: maintpb.GithubIssueMutation.locked:type_name -> maintpb.BoolChange
-	24, // 13: maintpb.GithubIssueMutation.closed_at:type_name -> google.protobuf.Timestamp
+	25, // 13: maintpb.GithubIssueMutation.closed_at:type_name -> google.protobuf.Timestamp
 	13, // 14: maintpb.GithubIssueMutation.closed_by:type_name -> maintpb.GithubUser
 	5,  // 15: maintpb.GithubIssueMutation.add_label:type_name -> maintpb.GithubLabel
 	12, // 16: maintpb.GithubIssueMutation.comment:type_name -> maintpb.GithubIssueCommentMutation
@@ -2163,33 +2311,40 @@ var file_maintner_proto_depIdxs = []int32{
 	11, // 21: maintpb.GithubIssueMutation.review_status:type_name -> maintpb.GithubIssueSyncStatus
 	14, // 22: maintpb.GithubIssueMutation.reaction:type_name -> maintpb.GithubReaction
 	11, // 23: maintpb.GithubIssueMutation.reaction_status:type_name -> maintpb.GithubIssueSyncStatus
-	3,  // 24: maintpb.GithubMilestone.closed:type_name -> maintpb.BoolChange
-	24, // 25: maintpb.GithubIssueEvent.created:type_name -> google.protobuf.Timestamp
-	5,  // 26: maintpb.GithubIssueEvent.label:type_name -> maintpb.GithubLabel
-	6,  // 27: maintpb.GithubIssueEvent.milestone:type_name -> maintpb.GithubMilestone
-	9,  // 28: maintpb.GithubIssueEvent.commit:type_name -> maintpb.GithubCommit
-	15, // 29: maintpb.GithubIssueEvent.team_reviewer:type_name -> maintpb.GithubTeam
-	8,  // 30: maintpb.GithubIssueEvent.dismissed_review:type_name -> maintpb.GithubDismissedReviewEvent
-	24, // 31: maintpb.GithubReview.created:type_name -> google.protobuf.Timestamp
-	24, // 32: maintpb.GithubIssueSyncStatus.server_date:type_name -> google.protobuf.Timestamp
-	13, // 33: maintpb.GithubIssueCommentMutation.user:type_name -> maintpb.GithubUser
-	24, // 34: maintpb.GithubIssueCommentMutation.created:type_name -> google.protobuf.Timestamp
-	24, // 35: maintpb.GithubIssueCommentMutation.updated:type_name -> google.protobuf.Timestamp
-	14, // 36: maintpb.GithubIssueCommentMutation.reaction:type_name -> maintpb.GithubReaction
-	24, // 37: maintpb.GithubReaction.created:type_name -> google.protobuf.Timestamp
-	17, // 38: maintpb.GitMutation.repo:type_name -> maintpb.GitRepo
-	18, // 39: maintpb.GitMutation.commit:type_name -> maintpb.GitCommit
-	23, // 40: maintpb.GitMutation.ref_update:type_name -> maintpb.GitRef
-	21, // 41: maintpb.GitMutation.tag:type_name -> maintpb.GitTag
-	19, // 42: maintpb.GitCommit.diff_tree:type_name -> maintpb.GitDiffTree
-	20, // 43: maintpb.GitDiffTree.file:type_name -> maintpb.GitDiffTreeFile
-	18, // 44: maintpb.GerritMutation.commits:type_name -> maintpb.GitCommit
-	23, // 45: maintpb.GerritMutation.refs:type_name -> maintpb.GitRef
-	46, // [46:46] is the sub-list for method output_type
-	46, // [46:46] is the sub-list for method input_type
-	46, // [46:46] is the sub-list for extension type_name
-	46, // [46:46] is the sub-list for extension extendee
-	0,  // [0:46] is the sub-list for field type_name
+	3,  // 24: maintpb.GithubIssueMutation.draft:type_name -> maintpb.BoolChange
+	3,  // 25: maintpb.GithubIssueMutation.merged:type_name -> maintpb.BoolChange
+	25, // 26: maintpb.GithubIssueMutation.merged_at:type_name -> google.protobuf.Timestamp
+	13, // 27: maintpb.GithubIssueMutation.merged_by:type_name -> maintpb.GithubUser
+	16, // 28: maintpb.GithubIssueMutation.head:type_name -> maintpb.GithubPullRequestBranch
+	16, // 29: maintpb.GithubIssueMutation.base:type_name -> maintpb.GithubPullRequestBranch
+	11, // 30: maintpb.GithubIssueMutation.pr_detail_status:type_name -> maintpb.GithubIssueSyncStatus
+	3,  // 31: maintpb.GithubMilestone.closed:type_name -> maintpb.BoolChange
+	25, // 32: maintpb.GithubIssueEvent.created:type_name -> google.protobuf.Timestamp
+	5,  // 33: maintpb.GithubIssueEvent.label:type_name -> maintpb.GithubLabel
+	6,  // 34: maintpb.GithubIssueEvent.milestone:type_name -> maintpb.GithubMilestone
+	9,  // 35: maintpb.GithubIssueEvent.commit:type_name -> maintpb.GithubCommit
+	15, // 36: maintpb.GithubIssueEvent.team_reviewer:type_name -> maintpb.GithubTeam
+	8,  // 37: maintpb.GithubIssueEvent.dismissed_review:type_name -> maintpb.GithubDismissedReviewEvent
+	25, // 38: maintpb.GithubReview.created:type_name -> google.protobuf.Timestamp
+	25, // 39: maintpb.GithubIssueSyncStatus.server_date:type_name -> google.protobuf.Timestamp
+	13, // 40: maintpb.GithubIssueCommentMutation.user:type_name -> maintpb.GithubUser
+	25, // 41: maintpb.GithubIssueCommentMutation.created:type_name -> google.protobuf.Timestamp
+	25, // 42: maintpb.GithubIssueCommentMutation.updated:type_name -> google.protobuf.Timestamp
+	14, // 43: maintpb.GithubIssueCommentMutation.reaction:type_name -> maintpb.GithubReaction
+	25, // 44: maintpb.GithubReaction.created:type_name -> google.protobuf.Timestamp
+	18, // 45: maintpb.GitMutation.repo:type_name -> maintpb.GitRepo
+	19, // 46: maintpb.GitMutation.commit:type_name -> maintpb.GitCommit
+	24, // 47: maintpb.GitMutation.ref_update:type_name -> maintpb.GitRef
+	22, // 48: maintpb.GitMutation.tag:type_name -> maintpb.GitTag
+	20, // 49: maintpb.GitCommit.diff_tree:type_name -> maintpb.GitDiffTree
+	21, // 50: maintpb.GitDiffTree.file:type_name -> maintpb.GitDiffTreeFile
+	19, // 51: maintpb.GerritMutation.commits:type_name -> maintpb.GitCommit
+	24, // 52: maintpb.GerritMutation.refs:type_name -> maintpb.GitRef
+	53, // [53:53] is the sub-list for method output_type
+	53, // [53:53] is the sub-list for method input_type
+	53, // [53:53] is the sub-list for extension type_name
+	53, // [53:53] is the sub-list for extension extendee
+	0,  // [0:53] is the sub-list for field type_name
 }
 
 func init() { file_maintner_proto_init() }
@@ -2203,7 +2358,7 @@ func file_maintner_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_maintner_proto_rawDesc), len(file_maintner_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   24,
+			NumMessages:   25,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

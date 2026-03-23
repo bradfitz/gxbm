@@ -587,7 +587,7 @@ func TestParseMultipleGithubEvents(t *testing.T) {
 
 func TestParseMultipleGithubEventsWithForeach(t *testing.T) {
 	issue := &GitHubIssue{
-		PullRequest: true,
+		PullRequest: &GitHubPullRequest{},
 		events: map[int64]*GitHubIssueEvent{
 			0: &GitHubIssueEvent{
 				Type: "labelled",
@@ -658,7 +658,7 @@ func TestSyncEvents(t *testing.T) {
 	gr := c.github.getOrCreateRepo("foowner", "bar")
 	issue := &GitHubIssue{
 		ID:          1001,
-		PullRequest: true,
+		PullRequest: &GitHubPullRequest{},
 		events:      map[int64]*GitHubIssueEvent{},
 	}
 	gr.issues = map[int32]*GitHubIssue{
@@ -734,7 +734,7 @@ func TestSyncMultipleConsecutiveEvents(t *testing.T) {
 	gr := c.github.getOrCreateRepo("foowner", "bar")
 	issue := &GitHubIssue{
 		ID:          1001,
-		PullRequest: true,
+		PullRequest: &GitHubPullRequest{},
 		events:      map[int64]*GitHubIssueEvent{},
 	}
 	gr.issues = map[int32]*GitHubIssue{
@@ -933,7 +933,7 @@ func TestForeachRepo(t *testing.T) {
 		{
 			name: "Skips non-PullRequests",
 			issue: &GitHubIssue{
-				PullRequest: false,
+				PullRequest: nil,
 			},
 			want:    []string{},
 			wantErr: nil,
@@ -941,7 +941,7 @@ func TestForeachRepo(t *testing.T) {
 		{
 			name: "Processes Multiple in Order",
 			issue: &GitHubIssue{
-				PullRequest: true,
+				PullRequest: &GitHubPullRequest{},
 				reviews: map[int64]*GitHubReview{
 					0: &GitHubReview{
 						Body:    "Second",
@@ -959,7 +959,7 @@ func TestForeachRepo(t *testing.T) {
 		{
 			name: "Will Error",
 			issue: &GitHubIssue{
-				PullRequest: true,
+				PullRequest: &GitHubPullRequest{},
 				reviews: map[int64]*GitHubReview{
 					0: &GitHubReview{
 						Body: "Fail",
@@ -972,7 +972,7 @@ func TestForeachRepo(t *testing.T) {
 		{
 			name: "Will Error Late",
 			issue: &GitHubIssue{
-				PullRequest: true,
+				PullRequest: &GitHubPullRequest{},
 				reviews: map[int64]*GitHubReview{
 					0: &GitHubReview{
 						Body:    "First Event",
@@ -1271,5 +1271,158 @@ func TestReactionStatus(t *testing.T) {
 
 	if gi.reactionsSyncedAsOf.IsZero() {
 		t.Error("reactionsSyncedAsOf should be set after reaction_status mutation")
+	}
+}
+
+func TestProcessMutation_PullRequest(t *testing.T) {
+	c := new(Corpus)
+
+	// Create a PR issue.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:       "golang",
+			Repo:        "go",
+			Number:      10,
+			PullRequest: true,
+			User:        &maintpb.GithubUser{Id: 1, Login: "author"},
+			Created:     timestamppb.New(t1),
+		},
+	})
+
+	gi := c.github.repos[GitHubRepoID{"golang", "go"}].issues[10]
+	if !gi.IsPullRequest() {
+		t.Fatal("expected issue to be a pull request")
+	}
+	if gi.PullRequest.Issue != gi {
+		t.Error("PullRequest.Issue back-pointer not set")
+	}
+
+	// Apply PR detail mutation with merge info and branches.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:       "golang",
+			Repo:        "go",
+			Number:      10,
+			PullRequest: true,
+			Draft:       &maintpb.BoolChange{Val: false},
+			Merged:      &maintpb.BoolChange{Val: true},
+			MergedAt:    timestamppb.New(t2),
+			MergedBy:    &maintpb.GithubUser{Id: 2, Login: "merger"},
+			MergeCommitHash: "abc123def456abc123def456abc123def456abc1",
+			Head: &maintpb.GithubPullRequestBranch{
+				Ref:   "feature-branch",
+				Hash:  "1111111111111111111111111111111111111111",
+				Owner: "contributor",
+				Repo:  "go",
+			},
+			Base: &maintpb.GithubPullRequestBranch{
+				Ref:   "main",
+				Hash:  "2222222222222222222222222222222222222222",
+				Owner: "golang",
+				Repo:  "go",
+			},
+			PrDetailStatus: &maintpb.GithubIssueSyncStatus{
+				ServerDate: timestamppb.Now(),
+			},
+		},
+	})
+
+	pr := gi.PullRequest
+	if pr.Draft {
+		t.Error("expected Draft to be false")
+	}
+	if !pr.Merged {
+		t.Error("expected Merged to be true")
+	}
+	if !pr.MergedAt.Equal(t2) {
+		t.Errorf("MergedAt = %v; want %v", pr.MergedAt, t2)
+	}
+	if pr.MergedBy == nil || pr.MergedBy.Login != "merger" {
+		t.Errorf("MergedBy = %v; want merger", pr.MergedBy)
+	}
+	if pr.MergeCommitSHA != "abc123def456abc123def456abc123def456abc1" {
+		t.Errorf("MergeCommitSHA = %q", pr.MergeCommitSHA)
+	}
+	if pr.Head.Ref != "feature-branch" || pr.Head.Owner != "contributor" {
+		t.Errorf("Head = %+v", pr.Head)
+	}
+	if pr.Base.Ref != "main" || pr.Base.Owner != "golang" {
+		t.Errorf("Base = %+v", pr.Base)
+	}
+	if gi.prDetailsSyncedAsOf.IsZero() {
+		t.Error("prDetailsSyncedAsOf should be set")
+	}
+}
+
+func TestProcessMutation_PullRequest_DraftChange(t *testing.T) {
+	c := new(Corpus)
+
+	// Create a draft PR.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:       "golang",
+			Repo:        "go",
+			Number:      11,
+			PullRequest: true,
+			User:        &maintpb.GithubUser{Id: 1, Login: "author"},
+			Draft:       &maintpb.BoolChange{Val: true},
+		},
+	})
+
+	gi := c.github.repos[GitHubRepoID{"golang", "go"}].issues[11]
+	if !gi.PullRequest.Draft {
+		t.Error("expected Draft to be true initially")
+	}
+
+	// Mark as ready for review.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:       "golang",
+			Repo:        "go",
+			Number:      11,
+			PullRequest: true,
+			Draft:       &maintpb.BoolChange{Val: false},
+		},
+	})
+
+	if gi.PullRequest.Draft {
+		t.Error("expected Draft to be false after change")
+	}
+}
+
+func TestProcessMutation_NonPR_IgnoresPRFields(t *testing.T) {
+	c := new(Corpus)
+
+	// Create a regular issue (not a PR).
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "golang",
+			Repo:   "go",
+			Number: 12,
+			User:   &maintpb.GithubUser{Id: 1, Login: "author"},
+		},
+	})
+
+	gi := c.github.repos[GitHubRepoID{"golang", "go"}].issues[12]
+	if gi.IsPullRequest() {
+		t.Error("regular issue should not be a pull request")
+	}
+
+	// Apply a mutation with PR fields but pull_request=false.
+	// The PR fields should be ignored since this isn't a PR.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "golang",
+			Repo:   "go",
+			Number: 12,
+			Merged: &maintpb.BoolChange{Val: true},
+			Head: &maintpb.GithubPullRequestBranch{
+				Ref: "some-branch",
+			},
+		},
+	})
+
+	if gi.IsPullRequest() {
+		t.Error("issue should still not be a pull request")
 	}
 }

@@ -171,7 +171,7 @@ func TestNewMutationsFromIssue(t *testing.T) {
 	gr := &GitHubRepo{
 		id: GitHubRepoID{"golang", "go"},
 	}
-	is := gr.newMutationFromIssue(nil, gh)
+	is, _ := gr.newMutationFromIssue(nil, gh)
 	want := &maintpb.Mutation{GithubIssue: &maintpb.GithubIssueMutation{
 		Owner:       "golang",
 		Repo:        "go",
@@ -229,7 +229,7 @@ func TestAssigneesDeleted(t *testing.T) {
 		},
 	}
 
-	mutation := gr.newMutationFromIssue(issue, &github.Issue{
+	mutation, _ := gr.newMutationFromIssue(issue, &github.Issue{
 		Number:    github.Int(3),
 		Assignees: []*github.User{&github.User{ID: github.Int64(u2.ID)}},
 	})
@@ -266,7 +266,7 @@ func TestSync(t *testing.T) {
 		},
 	}
 
-	mutation := gr.newMutationFromIssue(issue, &github.Issue{
+	mutation, _ := gr.newMutationFromIssue(issue, &github.Issue{
 		Number:    github.Int(3),
 		Assignees: []*github.User{&github.User{ID: github.Int64(u2.ID)}},
 	})

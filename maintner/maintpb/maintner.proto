@@ -89,7 +89,17 @@ message GithubIssueMutation {
   repeated int64 removed_reaction_id = 33;      // reaction IDs removed from the issue body
   GithubIssueSyncStatus reaction_status = 34;   // sync cursor for reactions
 
-  // Next tag: 35
+  // PR-specific fields. Only set when pull_request is true.
+  BoolChange draft = 35;
+  BoolChange merged = 36;
+  google.protobuf.Timestamp merged_at = 37;
+  GithubUser merged_by = 38;
+  string merge_commit_hash = 39;
+  GithubPullRequestBranch head = 40;   // source branch
+  GithubPullRequestBranch base = 41;   // target branch
+  GithubIssueSyncStatus pr_detail_status = 42;  // sync cursor for PR detail fetch
+
+  // Next tag: 43
 }
 
 // BoolChange represents a change to a boolean value.
@@ -243,6 +253,14 @@ message GithubReaction {
 message GithubTeam {
   int64 id = 1;
   string slug = 2;
+}
+
+// GithubPullRequestBranch identifies a branch in a pull request (head or base).
+message GithubPullRequestBranch {
+  string ref = 1;       // branch name, e.g. "main" or "feature-x"
+  string hash = 2;      // commit SHA
+  string owner = 3;     // repo owner (may differ from issue owner for fork PRs)
+  string repo = 4;      // repo name
 }
 
 message GitMutation {

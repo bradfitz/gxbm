@@ -174,7 +174,7 @@ func (gr *GitHubRepo) ForeachIssue(fn func(*GitHubIssue) error) error {
 //
 // The fn function is called serially, in chronological order.
 func (pr *GitHubIssue) ForeachReview(fn func(*GitHubReview) error) error {
-	if !pr.PullRequest {
+	if !pr.IsPullRequest() {
 		return nil
 	}
 	s := make([]*GitHubReview, 0, len(pr.reviews))
@@ -265,7 +265,7 @@ type GitHubIssue struct {
 	NotExist    bool // if true, rest of fields should be ignored.
 	Closed      bool
 	Locked      bool
-	PullRequest bool // if true, this issue is a Pull Request. All PRs are issues, but not all issues are PRs.
+	PullRequest *GitHubPullRequest // non-nil if this issue is a pull request
 	User        *GitHubUser
 	Assignees   []*GitHubUser
 	Created     time.Time
@@ -277,16 +277,44 @@ type GitHubIssue struct {
 	Milestone   *GitHubMilestone       // nil for unknown, noMilestone for none
 	Labels      map[int64]*GitHubLabel // label ID => label
 
-	commentsUpdatedTil time.Time                   // max comment modtime seen
-	commentsSyncedAsOf time.Time                   // as of server's Date header
-	comments           map[int64]*GitHubComment    // by comment.ID
-	eventMaxTime       time.Time                   // latest time of any event in events map
-	eventsSyncedAsOf   time.Time                   // as of server's Date header
-	reviewsSyncedAsOf    time.Time                   // as of server's Date header
-	events               map[int64]*GitHubIssueEvent // by event.ID
-	reviews              map[int64]*GitHubReview     // by event.ID
-	reactions            map[int64]*GitHubReaction   // by reaction.ID, on the issue body
-	reactionsSyncedAsOf  time.Time                   // as of server's Date header
+	commentsUpdatedTil  time.Time                   // max comment modtime seen
+	commentsSyncedAsOf  time.Time                   // as of server's Date header
+	comments            map[int64]*GitHubComment    // by comment.ID
+	eventMaxTime        time.Time                   // latest time of any event in events map
+	eventsSyncedAsOf    time.Time                   // as of server's Date header
+	reviewsSyncedAsOf   time.Time                   // as of server's Date header
+	events              map[int64]*GitHubIssueEvent // by event.ID
+	reviews             map[int64]*GitHubReview     // by event.ID
+	reactions           map[int64]*GitHubReaction   // by reaction.ID, on the issue body
+	reactionsSyncedAsOf time.Time                   // as of server's Date header
+	prDetailsSyncedAsOf time.Time                   // as of server's Date header
+}
+
+// IsPullRequest reports whether the issue is a pull request.
+func (gi *GitHubIssue) IsPullRequest() bool {
+	return gi != nil && gi.PullRequest != nil
+}
+
+// GitHubPullRequest holds PR-specific metadata for a GitHub pull request.
+// All PRs are also issues; the common fields (number, title, body, labels,
+// assignees, created, updated, etc.) live on the parent GitHubIssue.
+type GitHubPullRequest struct {
+	Issue          *GitHubIssue // back-pointer to the parent issue; always non-nil
+	Draft          bool
+	Merged         bool
+	MergedAt       time.Time
+	MergedBy       *GitHubUser
+	MergeCommitSHA GitHash
+	Head           GitHubPullRequestBranch
+	Base           GitHubPullRequestBranch
+}
+
+// GitHubPullRequestBranch identifies a branch in a pull request (head or base).
+type GitHubPullRequestBranch struct {
+	Ref   string  // branch name, e.g. "main" or "feature-x"
+	Hash  GitHash // commit SHA
+	Owner string  // repo owner (may differ from issue owner for fork PRs)
+	Repo  string  // repo name
 }
 
 // LastModified reports the most recent time that any known metadata was updated.
@@ -1065,28 +1093,28 @@ type githubIssueDiffer struct {
 	b  *github.Issue // may NOT be nil
 }
 
-// returns nil if no changes.
-func (d githubIssueDiffer) Diff() *maintpb.GithubIssueMutation {
-	var changed bool
+// Diff returns a minimal mutation and a summary of what changed.
+// Returns (nil, "") if no changes.
+func (d githubIssueDiffer) Diff() (*maintpb.GithubIssueMutation, string) {
 	m := &maintpb.GithubIssueMutation{
 		Owner:       d.gr.id.Owner,
 		Repo:        d.gr.id.Repo,
 		Number:      int32(d.b.GetNumber()),
 		PullRequest: d.b.IsPullRequest(),
 	}
+	var fields []string
 	for _, f := range issueDiffMethods {
 		if f(d, m) {
-			if d.gr.verbose() {
-				fname := strings.TrimPrefix(runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name(), "github.com/bradfitz/gxbm/maintner.githubIssueDiffer.")
-				log.Printf("Issue %d changed: %v", d.b.GetNumber(), fname)
-			}
-			changed = true
+			fname := runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name()
+			fname = strings.TrimPrefix(fname, "github.com/bradfitz/gxbm/maintner.githubIssueDiffer.")
+			fname = strings.TrimPrefix(fname, "diff")
+			fields = append(fields, fname)
 		}
 	}
-	if !changed {
-		return nil
+	if len(fields) == 0 {
+		return nil, ""
 	}
-	return m
+	return m, strings.Join(fields, ",")
 }
 
 // issueDiffMethods are the different steps githubIssueDiffer.Diff
@@ -1106,6 +1134,8 @@ var issueDiffMethods = []func(githubIssueDiffer, *maintpb.GithubIssueMutation) b
 	githubIssueDiffer.diffClosedBy,
 	githubIssueDiffer.diffLockedState,
 	githubIssueDiffer.diffLabels,
+	githubIssueDiffer.diffDraft,
+	githubIssueDiffer.diffMergedAt,
 }
 
 func (d githubIssueDiffer) diffCreatedAt(m *maintpb.GithubIssueMutation) bool {
@@ -1265,22 +1295,53 @@ func (d githubIssueDiffer) diffLockedState(m *maintpb.GithubIssueMutation) bool 
 	return true
 }
 
+func (d githubIssueDiffer) diffDraft(m *maintpb.GithubIssueMutation) bool {
+	if !d.b.IsPullRequest() {
+		return false
+	}
+	bdraft := d.b.GetDraft()
+	if d.a != nil && d.a.PullRequest != nil && d.a.PullRequest.Draft == bdraft {
+		return false
+	}
+	if d.a != nil && d.a.PullRequest == nil && !bdraft {
+		return false
+	}
+	m.Draft = &maintpb.BoolChange{Val: bdraft}
+	return true
+}
+
+func (d githubIssueDiffer) diffMergedAt(m *maintpb.GithubIssueMutation) bool {
+	if d.b.PullRequestLinks == nil {
+		return false
+	}
+	mergedAt := d.b.PullRequestLinks.GetMergedAt().Time
+	if mergedAt.IsZero() {
+		return false
+	}
+	if d.a != nil && d.a.PullRequest != nil && d.a.PullRequest.MergedAt.Equal(mergedAt) {
+		return false
+	}
+	m.MergedAt = timestamppb.New(mergedAt)
+	return true
+}
+
 // newMutationFromIssue generates a GithubIssueMutation using the
 // smallest possible diff between a (the state we have in memory in
 // the corpus) and b (the current GitHub API state).
 //
 // If newMutationFromIssue returns nil, the provided github.Issue is no newer
 // than the data we have in the corpus. 'a' may be nil.
-func (r *GitHubRepo) newMutationFromIssue(a *GitHubIssue, b *github.Issue) *maintpb.Mutation {
+//
+// The returned summary describes which fields changed (e.g. "Title,Body,Labels").
+func (r *GitHubRepo) newMutationFromIssue(a *GitHubIssue, b *github.Issue) (mut *maintpb.Mutation, summary string) {
 	if b == nil || b.Number == nil {
 		panic(fmt.Sprintf("github issue with nil number: %#v", b))
 	}
-	gim := githubIssueDiffer{gr: r, a: a, b: b}.Diff()
+	gim, summary := githubIssueDiffer{gr: r, a: a, b: b}.Diff()
 	if gim == nil {
-		// No changes.
-		return nil
+		return nil, ""
 	}
-	return &maintpb.Mutation{GithubIssue: gim}
+	return &maintpb.Mutation{GithubIssue: gim}, summary
 }
 
 // processGithubMutation updates the corpus with the information in m.
@@ -1378,7 +1439,45 @@ func (c *Corpus) processGithubIssueMutation(m *maintpb.GithubIssueMutation) {
 		gi.Locked = b.Val
 	}
 	if m.PullRequest {
-		gi.PullRequest = true
+		if gi.PullRequest == nil {
+			gi.PullRequest = &GitHubPullRequest{Issue: gi}
+		}
+	}
+	if pr := gi.PullRequest; pr != nil {
+		if b := m.Draft; b != nil {
+			pr.Draft = b.Val
+		}
+		if b := m.Merged; b != nil {
+			pr.Merged = b.Val
+		}
+		if m.MergedAt != nil {
+			pr.MergedAt = m.MergedAt.AsTime()
+		}
+		if m.MergedBy != nil {
+			pr.MergedBy = c.github.getUser(m.MergedBy)
+		}
+		if m.MergeCommitHash != "" {
+			pr.MergeCommitSHA = GitHash(m.MergeCommitHash)
+		}
+		if m.Head != nil {
+			pr.Head = GitHubPullRequestBranch{
+				Ref:   m.Head.Ref,
+				Hash:  GitHash(m.Head.Hash),
+				Owner: m.Head.Owner,
+				Repo:  m.Head.Repo,
+			}
+		}
+		if m.Base != nil {
+			pr.Base = GitHubPullRequestBranch{
+				Ref:   m.Base.Ref,
+				Hash:  GitHash(m.Base.Hash),
+				Owner: m.Base.Owner,
+				Repo:  m.Base.Repo,
+			}
+		}
+		if m.PrDetailStatus != nil && m.PrDetailStatus.ServerDate != nil {
+			gi.prDetailsSyncedAsOf = m.PrDetailStatus.ServerDate.AsTime().UTC()
+		}
 	}
 
 	gi.Assignees = c.github.setAssigneesFromProto(gi.Assignees, m.Assignees, m.DeletedAssignees)
@@ -1660,10 +1759,162 @@ func (p *githubRepoPoller) sync(ctx context.Context, expectChanges bool) error {
 	if err := p.syncReviews(ctx); err != nil {
 		return err
 	}
+	if err := p.syncPullRequests(ctx); err != nil {
+		return err
+	}
 	if err := p.syncReactions(ctx); err != nil {
 		return err
 	}
 	return nil
+}
+
+// syncPullRequests fetches PR-specific details (merge info, head/base branches)
+// for pull requests that need updating. It uses the Pulls API which provides
+// data not available from the Issues API.
+func (p *githubRepoPoller) syncPullRequests(ctx context.Context) error {
+	nums := p.issueNumbersWithStalePRDetails()
+	if len(nums) == 0 {
+		return nil
+	}
+	p.logf("syncing PR details for %d pull requests", len(nums))
+	for _, num := range nums {
+		if err := p.syncPullRequestDetails(ctx, num); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *githubRepoPoller) issueNumbersWithStalePRDetails() (issueNums []int32) {
+	p.c.mu.RLock()
+	defer p.c.mu.RUnlock()
+	for n, gi := range p.gr.issues {
+		if gi.IsPullRequest() && !gi.prDetailsSyncedAsOf.After(gi.Updated) {
+			issueNums = append(issueNums, n)
+		}
+	}
+	slices.Sort(issueNums)
+	return issueNums
+}
+
+func (p *githubRepoPoller) syncPullRequestDetails(ctx context.Context, issueNum int32) error {
+	pr, resp, err := p.githubDirect.PullRequests.Get(ctx, p.Owner(), p.Repo(), int(issueNum))
+	if err != nil {
+		return fmt.Errorf("fetching PR %d: %w", issueNum, err)
+	}
+
+	serverDate, err := http.ParseTime(resp.Header.Get("Date"))
+	if err != nil {
+		serverDate = time.Now().UTC()
+	}
+
+	p.c.mu.RLock()
+	gi := p.gr.issues[issueNum]
+	p.c.mu.RUnlock()
+	if gi == nil || !gi.IsPullRequest() {
+		return nil
+	}
+
+	mut := &maintpb.GithubIssueMutation{
+		Owner:       p.Owner(),
+		Repo:        p.Repo(),
+		Number:      issueNum,
+		PullRequest: true,
+	}
+
+	var changed bool
+
+	// Merged status.
+	merged := pr.GetMerged()
+	if gi.PullRequest.Merged != merged {
+		mut.Merged = &maintpb.BoolChange{Val: merged}
+		changed = true
+	}
+
+	// Draft status.
+	draft := pr.GetDraft()
+	if gi.PullRequest.Draft != draft {
+		mut.Draft = &maintpb.BoolChange{Val: draft}
+		changed = true
+	}
+
+	// Merge commit SHA.
+	if sha := pr.GetMergeCommitSHA(); sha != "" && GitHash(sha) != gi.PullRequest.MergeCommitSHA {
+		mut.MergeCommitHash = sha
+		changed = true
+	}
+
+	// Merged by.
+	if mb := pr.MergedBy; mb != nil {
+		if gi.PullRequest.MergedBy == nil || gi.PullRequest.MergedBy.ID != mb.GetID() {
+			mut.MergedBy = &maintpb.GithubUser{
+				Id:    mb.GetID(),
+				Login: mb.GetLogin(),
+			}
+			changed = true
+		}
+	}
+
+	// Head branch.
+	if h := pr.Head; h != nil {
+		newHead := prBranchFromAPI(h)
+		if newHead != gi.PullRequest.Head {
+			mut.Head = newHead.proto()
+			changed = true
+		}
+	}
+
+	// Base branch.
+	if b := pr.Base; b != nil {
+		newBase := prBranchFromAPI(b)
+		if newBase != gi.PullRequest.Base {
+			mut.Base = newBase.proto()
+			changed = true
+		}
+	}
+
+	mut.PrDetailStatus = &maintpb.GithubIssueSyncStatus{
+		ServerDate: timestamppb.New(serverDate),
+	}
+
+	if changed {
+		p.c.addMutation(&maintpb.Mutation{GithubIssue: mut})
+	} else {
+		// Even with no data changes, record that we checked.
+		p.c.addMutation(&maintpb.Mutation{GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:       p.Owner(),
+			Repo:        p.Repo(),
+			Number:      issueNum,
+			PullRequest: true,
+			PrDetailStatus: &maintpb.GithubIssueSyncStatus{
+				ServerDate: timestamppb.New(serverDate),
+			},
+		}})
+	}
+	return nil
+}
+
+func prBranchFromAPI(b *github.PullRequestBranch) GitHubPullRequestBranch {
+	br := GitHubPullRequestBranch{
+		Ref:  b.GetRef(),
+		Hash: GitHash(b.GetSHA()),
+	}
+	if r := b.Repo; r != nil {
+		if owner := r.Owner; owner != nil {
+			br.Owner = owner.GetLogin()
+		}
+		br.Repo = r.GetName()
+	}
+	return br
+}
+
+func (b GitHubPullRequestBranch) proto() *maintpb.GithubPullRequestBranch {
+	return &maintpb.GithubPullRequestBranch{
+		Ref:   b.Ref,
+		Hash:  string(b.Hash),
+		Owner: b.Owner,
+		Repo:  b.Repo,
+	}
 }
 
 func (p *githubRepoPoller) syncMilestones(ctx context.Context) error {
@@ -1859,10 +2110,11 @@ func (p *githubRepoPoller) syncIssues(ctx context.Context, expectChanges bool) e
 			seen[id] = true
 
 			var mp *maintpb.Mutation
+			var diffSummary string
 			p.c.mu.RLock()
 			{
 				gi := p.gr.issues[int32(*is.Number)]
-				mp = p.gr.newMutationFromIssue(gi, is)
+				mp, diffSummary = p.gr.newMutationFromIssue(gi, is)
 				// Check if issue-body reaction counts changed.
 				if gi != nil && is.Reactions.GetTotalCount() != len(gi.reactions) {
 					p.staleReactionIssues[int32(*is.Number)] = true
@@ -1889,7 +2141,7 @@ func (p *githubRepoPoller) syncIssues(ctx context.Context, expectChanges bool) e
 			}
 
 			changes++
-			p.logf("changed issue %d: %s", is.GetNumber(), is.GetTitle())
+			p.logf("changed issue %d [%s]: %s", is.GetNumber(), diffSummary, is.GetTitle())
 			p.c.addMutation(mp)
 			p.lastUpdate = time.Now()
 		}
@@ -2605,8 +2857,9 @@ func parseGithubEvents(r io.Reader) ([]*GitHubIssueEvent, error) {
 				e.TeamReviewer = t
 			}
 		}
-		delete(em, "node_id")     // GitHub API v4 Global Node ID; don't store it.
-		delete(em, "lock_reason") // Not stored.
+		delete(em, "node_id")                    // GitHub API v4 Global Node ID; don't store it.
+		delete(em, "lock_reason")                // Not stored.
+		delete(em, "performed_via_github_app")   // Not stored; e.g. Copilot PR reviewer.
 
 		otherJSON, _ := json.Marshal(em)
 		e.OtherJSON = string(otherJSON)
@@ -2626,7 +2879,7 @@ func (p *githubRepoPoller) issueNumbersWithStaleReviewsSync() (issueNums []int32
 	defer p.c.mu.RUnlock()
 
 	for n, gi := range p.gr.issues {
-		if gi.PullRequest && !gi.reviewsSynced() {
+		if gi.IsPullRequest() && !gi.reviewsSynced() {
 			issueNums = append(issueNums, n)
 		}
 	}
@@ -2671,7 +2924,7 @@ func (p *githubRepoPoller) syncReviewsOnPullRequest(ctx context.Context, issueNu
 		panic(fmt.Sprintf("bogus issue %v", issueNum))
 	}
 
-	if !gi.PullRequest {
+	if !gi.IsPullRequest() {
 		p.c.mu.RUnlock()
 		return nil
 	}

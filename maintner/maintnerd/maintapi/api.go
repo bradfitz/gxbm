@@ -43,10 +43,10 @@ type apiService struct {
 }
 
 func (s apiService) HasAncestor(ctx context.Context, req *apipb.HasAncestorRequest) (*apipb.HasAncestorResponse, error) {
-	if len(req.Commit) != 40 {
+	if !maintner.ValidHexHashLen(req.Commit) {
 		return nil, errors.New("invalid Commit")
 	}
-	if len(req.Ancestor) != 40 {
+	if !maintner.ValidHexHashLen(req.Ancestor) {
 		return nil, errors.New("invalid Ancestor")
 	}
 	s.c.RLock()

@@ -41,8 +41,8 @@ func TestGetRef(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Value) != 40 {
-		t.Errorf("go master ref = %q; want length 40 string", res.Value)
+	if !maintner.ValidHexHashLen(res.Value) {
+		t.Errorf("go master ref = %q; want valid hex hash length", res.Value)
 	}
 
 	// Bogus ref
@@ -831,7 +831,7 @@ type refHash struct {
 }
 
 func gitHash(hexa string) maintner.GitHash {
-	if len(hexa) != 40 {
+	if !maintner.ValidHexHashLen(hexa) {
 		panic(fmt.Errorf("bogus git hash %q", hexa))
 	}
 	binary, err := hex.DecodeString(hexa)

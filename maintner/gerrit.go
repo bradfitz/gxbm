@@ -224,10 +224,10 @@ func (gp *GerritProject) CL(number int32) *GerritCL {
 
 // GitCommit returns the provided git commit.
 func (gp *GerritProject) GitCommit(hash string) (*GitCommit, error) {
-	if len(hash) != 40 {
+	if !ValidHexHashLen(hash) {
 		// TODO: support prefix lookups. build a trie. But
 		// for now just avoid panicking in gitHashFromHexStr.
-		return nil, fmt.Errorf("git hash %q is not 40 characters", hash)
+		return nil, fmt.Errorf("git hash %q has invalid length", hash)
 	}
 	var buf [20]byte
 	_, err := decodeHexStr(buf[:], hash)

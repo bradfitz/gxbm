@@ -34,7 +34,14 @@ type GitHash string
 
 func (h GitHash) String() string { return fmt.Sprintf("%x", string(h)) }
 
-// requires c.mu be held for writing
+// ValidHexHashLen reports whether s has a plausible length for a
+// hex-encoded git object hash: 40 hex bytes (SHA-1) or 64 hex bytes (SHA-256).
+func ValidHexHashLen(s string) bool {
+	return len(s) == 40 || len(s) == 64
+}
+
+// requires c.mu be held for writing.
+// TODO: support SHA-256 (64 hex / 32 binary bytes) in addition to SHA-1.
 func (c *Corpus) gitHashFromHexStr(s string) GitHash {
 	if len(s) != 40 {
 		panic(fmt.Sprintf("bogus git hash %q", s))
@@ -322,12 +329,11 @@ func parseCommitFromGit(dir string, hash GitHash) (*maintpb.GitCommit, error) {
 		Raw:      catFile,
 		DiffTree: diffTree,
 	}
-	switch len(hash) {
-	case 20:
-		commit.Hash = hash.String()
-	default:
-		return nil, fmt.Errorf("unsupported git hash %q", hash.String())
+	hexHash := hash.String()
+	if !ValidHexHashLen(hexHash) {
+		return nil, fmt.Errorf("unsupported git hash length %d for %q", len(hexHash), hexHash)
 	}
+	commit.Hash = hexHash
 	return commit, nil
 }
 
@@ -430,7 +436,7 @@ func (c *Corpus) processGitMutation(m *maintpb.GitMutation) {
 
 // c.mu is held for writing.
 func (c *Corpus) processGitTag(tag *maintpb.GitTag) *GitTag {
-	if len(tag.Hash) != 40 || len(tag.TargetHash) != 40 {
+	if !ValidHexHashLen(tag.Hash) || !ValidHexHashLen(tag.TargetHash) {
 		log.Printf("bogus git tag hash %q / target %q", tag.Hash, tag.TargetHash)
 		return &GitTag{}
 	}
@@ -472,7 +478,7 @@ func (c *Corpus) processGitCommit(commit *maintpb.GitCommit) (*GitCommit, error)
 	if c.gitCommit == nil {
 		c.gitCommit = map[GitHash]*GitCommit{}
 	}
-	if len(commit.Hash) != 40 {
+	if !ValidHexHashLen(commit.Hash) {
 		return nil, fmt.Errorf("bogus git hash %q", commit.Hash)
 	}
 	hash := c.gitHashFromHexStr(commit.Hash)
@@ -637,7 +643,7 @@ func (c *Corpus) parsePerson(v []byte) (*GitPerson, time.Time, error) {
 
 // GitCommit returns the provided git commit, or nil if it's unknown.
 func (c *Corpus) GitCommit(hash string) *GitCommit {
-	if len(hash) != 40 {
+	if !ValidHexHashLen(hash) {
 		// TODO: support prefix lookups. build a trie. But
 		// for now just avoid panicking in gitHashFromHexStr.
 		return nil
@@ -771,7 +777,7 @@ func (c *Corpus) syncGitRepoOnce(ctx context.Context, ws *watchedGitRepoState, d
 			continue
 		}
 		hash, refName := fields[0], fields[1]
-		if len(hash) != 40 {
+		if !ValidHexHashLen(hash) {
 			continue
 		}
 		// Skip peeled tag refs (e.g. "refs/tags/v1.0^{}") from ls-remote;

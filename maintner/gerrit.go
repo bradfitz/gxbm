@@ -229,12 +229,12 @@ func (gp *GerritProject) GitCommit(hash string) (*GitCommit, error) {
 		// for now just avoid panicking in gitHashFromHexStr.
 		return nil, fmt.Errorf("git hash %q has invalid length", hash)
 	}
-	var buf [20]byte
-	_, err := decodeHexStr(buf[:], hash)
+	var buf [maxBinHashLen]byte
+	n, err := decodeHexHash(buf[:], hash)
 	if err != nil {
 		return nil, fmt.Errorf("git hash %q is not a valid hex string: %w", hash, err)
 	}
-	c := gp.commit[GitHash(buf[:])]
+	c := gp.commit[GitHash(buf[:n])]
 	if c == nil {
 		// TODO: return an error that the caller can unpack with errors.Is or
 		// errors.As to distinguish this case.

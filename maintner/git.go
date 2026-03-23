@@ -34,38 +34,52 @@ type GitHash string
 
 func (h GitHash) String() string { return fmt.Sprintf("%x", string(h)) }
 
+const (
+	maxHexHashLen = 64 // SHA-256; SHA-1 is 40
+	maxBinHashLen = 32 // SHA-256; SHA-1 is 20
+)
+
 // ValidHexHashLen reports whether s has a plausible length for a
 // hex-encoded git object hash: 40 hex bytes (SHA-1) or 64 hex bytes (SHA-256).
 func ValidHexHashLen(s string) bool {
 	return len(s) == 40 || len(s) == 64
 }
 
-// requires c.mu be held for writing.
-// TODO: support SHA-256 (64 hex / 32 binary bytes) in addition to SHA-1.
-func (c *Corpus) gitHashFromHexStr(s string) GitHash {
-	if len(s) != 40 {
-		panic(fmt.Sprintf("bogus git hash %q", s))
+// decodeHexHash decodes a hex-encoded git hash into buf (which must be
+// at least maxBinHashLen bytes) and returns the number of bytes written.
+// This avoids allocating by using a caller-provided stack buffer.
+func decodeHexHash(buf []byte, s string) (int, error) {
+	n := hex.DecodedLen(len(s))
+	if n > len(buf) {
+		return 0, fmt.Errorf("git hash %q too long", s)
 	}
-	var buf [40]byte
-	copy(buf[:], s)
-	_, err := hex.Decode(buf[:20], buf[:]) // aliasing is safe
-	if err != nil {
-		panic(fmt.Sprintf("bogus git hash %q: %v", s, err))
-	}
-	return GitHash(c.strb(buf[:20]))
+	return hex.Decode(buf[:n], []byte(s))
 }
 
-// requires c.mu be held for writing
-func (c *Corpus) gitHashFromHex(s []byte) GitHash {
-	if len(s) != 40 {
+// requires c.mu be held for writing.
+func (c *Corpus) gitHashFromHexStr(s string) GitHash {
+	if !ValidHexHashLen(s) {
 		panic(fmt.Sprintf("bogus git hash %q", s))
 	}
-	var buf [20]byte
-	_, err := hex.Decode(buf[:], s)
+	var buf [maxBinHashLen]byte
+	n, err := decodeHexHash(buf[:], s)
 	if err != nil {
 		panic(fmt.Sprintf("bogus git hash %q: %v", s, err))
 	}
-	return GitHash(c.strb(buf[:20]))
+	return GitHash(c.strb(buf[:n]))
+}
+
+// requires c.mu be held for writing.
+func (c *Corpus) gitHashFromHex(s []byte) GitHash {
+	if !ValidHexHashLen(string(s)) {
+		panic(fmt.Sprintf("bogus git hash %q", s))
+	}
+	var buf [maxBinHashLen]byte
+	n, err := hex.Decode(buf[:], s)
+	if err != nil {
+		panic(fmt.Sprintf("bogus git hash %q: %v", s, err))
+	}
+	return GitHash(c.strb(buf[:n]))
 }
 
 // placeholderCommitter is a sentinel value for GitCommit.Committer to
@@ -648,12 +662,12 @@ func (c *Corpus) GitCommit(hash string) *GitCommit {
 		// for now just avoid panicking in gitHashFromHexStr.
 		return nil
 	}
-	var buf [20]byte
-	_, err := decodeHexStr(buf[:], hash)
+	var buf [maxBinHashLen]byte
+	n, err := decodeHexHash(buf[:], hash)
 	if err != nil {
 		return nil
 	}
-	return c.gitCommit[GitHash(buf[:])]
+	return c.gitCommit[GitHash(buf[:n])]
 }
 
 // v is like '[+-]hhmm'
@@ -675,40 +689,6 @@ func (c *Corpus) gitLocation(v []byte) *time.Location {
 	}
 	c.zoneCache[s] = loc
 	return loc
-}
-
-func decodeHexStr(dst []byte, src string) (int, error) {
-	if len(src)%2 == 1 {
-		return 0, hex.ErrLength
-	}
-
-	for i := 0; i < len(src)/2; i++ {
-		a, ok := fromHexChar(src[i*2])
-		if !ok {
-			return 0, hex.InvalidByteError(src[i*2])
-		}
-		b, ok := fromHexChar(src[i*2+1])
-		if !ok {
-			return 0, hex.InvalidByteError(src[i*2+1])
-		}
-		dst[i] = (a << 4) | b
-	}
-
-	return len(src) / 2, nil
-}
-
-// fromHexChar converts a hex character into its value and a success flag.
-func fromHexChar(c byte) (byte, bool) {
-	switch {
-	case '0' <= c && c <= '9':
-		return c - '0', true
-	case 'a' <= c && c <= 'f':
-		return c - 'a' + 10, true
-	case 'A' <= c && c <= 'F':
-		return c - 'A' + 10, true
-	}
-
-	return 0, false
 }
 
 // gitScratchDir returns the path for a bare git scratch repo for the given name.
@@ -901,10 +881,10 @@ func gitObjectType(ctx context.Context, dir, hash string) (string, error) {
 }
 
 func mustDecodeHex(s string) string {
-	var buf [20]byte
-	_, err := hex.Decode(buf[:], []byte(s))
+	var buf [maxBinHashLen]byte
+	n, err := decodeHexHash(buf[:], s)
 	if err != nil {
 		panic(fmt.Sprintf("bad hex %q: %v", s, err))
 	}
-	return string(buf[:])
+	return string(buf[:n])
 }

@@ -1426,3 +1426,178 @@ func TestProcessMutation_NonPR_IgnoresPRFields(t *testing.T) {
 		t.Error("issue should still not be a pull request")
 	}
 }
+
+func TestProcessMutation_Actions_WorkflowRun(t *testing.T) {
+	c := new(Corpus)
+
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubActions: &maintpb.GithubActionsMutation{
+			Owner: "golang",
+			Repo:  "go",
+			Run: &maintpb.GithubWorkflowRun{
+				Id:         1001,
+				Name:       "CI",
+				HeadBranch: "main",
+				HeadHash:   "abc123",
+				Event:      "push",
+				Status:     "completed",
+				Conclusion: "success",
+				WorkflowId: 42,
+				RunNumber:  100,
+				RunAttempt: 1,
+				Created:    timestamppb.New(t1),
+				Updated:    timestamppb.New(t2),
+				RunStarted: timestamppb.New(t1),
+				ActorId:    99,
+				Url:        "https://github.com/golang/go/actions/runs/1001",
+				PullRequestNumbers: []int64{5, 10},
+			},
+		},
+	})
+
+	gr := c.github.repos[GitHubRepoID{"golang", "go"}]
+	if gr == nil {
+		t.Fatal("repo not created")
+	}
+	run := gr.workflowRuns[1001]
+	if run == nil {
+		t.Fatal("workflow run not created")
+	}
+	if run.Name != "CI" {
+		t.Errorf("Name = %q; want CI", run.Name)
+	}
+	if run.HeadBranch != "main" {
+		t.Errorf("HeadBranch = %q; want main", run.HeadBranch)
+	}
+	if run.Status != "completed" || run.Conclusion != "success" {
+		t.Errorf("Status/Conclusion = %q/%q; want completed/success", run.Status, run.Conclusion)
+	}
+	if run.WorkflowID != 42 {
+		t.Errorf("WorkflowID = %d; want 42", run.WorkflowID)
+	}
+	if len(run.PRNumbers) != 2 || run.PRNumbers[0] != 5 || run.PRNumbers[1] != 10 {
+		t.Errorf("PRNumbers = %v; want [5 10]", run.PRNumbers)
+	}
+}
+
+func TestProcessMutation_Actions_WorkflowJob(t *testing.T) {
+	c := new(Corpus)
+
+	// Create a run first.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubActions: &maintpb.GithubActionsMutation{
+			Owner: "golang",
+			Repo:  "go",
+			Run: &maintpb.GithubWorkflowRun{
+				Id:   2001,
+				Name: "Tests",
+			},
+		},
+	})
+
+	// Add a job to the run.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubActions: &maintpb.GithubActionsMutation{
+			Owner: "golang",
+			Repo:  "go",
+			Job: &maintpb.GithubWorkflowJob{
+				Id:         3001,
+				RunId:      2001,
+				Name:       "test-linux",
+				Status:     "completed",
+				Conclusion: "success",
+				Started:    timestamppb.New(t1),
+				Completed:  timestamppb.New(t2),
+				RunnerName: "ubuntu-latest",
+				Labels:     []string{"ubuntu-latest"},
+				Step: []*maintpb.GithubWorkflowStep{
+					{Name: "Checkout", Status: "completed", Conclusion: "success", Number: 1},
+					{Name: "Test", Status: "completed", Conclusion: "success", Number: 2},
+				},
+			},
+		},
+	})
+
+	gr := c.github.repos[GitHubRepoID{"golang", "go"}]
+	run := gr.workflowRuns[2001]
+	if run == nil {
+		t.Fatal("run not found")
+	}
+	job := run.Jobs[3001]
+	if job == nil {
+		t.Fatal("job not found")
+	}
+	if job.Name != "test-linux" {
+		t.Errorf("job Name = %q; want test-linux", job.Name)
+	}
+	if job.RunnerName != "ubuntu-latest" {
+		t.Errorf("RunnerName = %q; want ubuntu-latest", job.RunnerName)
+	}
+	if len(job.Steps) != 2 {
+		t.Fatalf("got %d steps; want 2", len(job.Steps))
+	}
+	if job.Steps[0].Name != "Checkout" || job.Steps[1].Name != "Test" {
+		t.Errorf("step names = %q, %q", job.Steps[0].Name, job.Steps[1].Name)
+	}
+}
+
+func TestProcessMutation_Actions_JobBeforeRun(t *testing.T) {
+	c := new(Corpus)
+
+	// Job arrives before its run — should create a placeholder run.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubActions: &maintpb.GithubActionsMutation{
+			Owner: "golang",
+			Repo:  "go",
+			Job: &maintpb.GithubWorkflowJob{
+				Id:    4001,
+				RunId: 5001,
+				Name:  "build",
+			},
+		},
+	})
+
+	gr := c.github.repos[GitHubRepoID{"golang", "go"}]
+	run := gr.workflowRuns[5001]
+	if run == nil {
+		t.Fatal("placeholder run not created for orphan job")
+	}
+	if run.Jobs[4001] == nil {
+		t.Fatal("job not added to placeholder run")
+	}
+}
+
+func TestDefaultGitHubSyncFilter(t *testing.T) {
+	f := DefaultGitHubSyncFilter()
+	if !f.Issues || !f.Comments || !f.Events || !f.Reviews || !f.PRDetails || !f.Reactions {
+		t.Error("default filter should enable all standard sync categories")
+	}
+	if f.Actions {
+		t.Error("default filter should not enable Actions")
+	}
+}
+
+func TestForeachWorkflowRun(t *testing.T) {
+	c := new(Corpus)
+
+	for _, id := range []int64{300, 100, 200} {
+		c.processMutationLocked(&maintpb.Mutation{
+			GithubActions: &maintpb.GithubActionsMutation{
+				Owner: "golang",
+				Repo:  "go",
+				Run:   &maintpb.GithubWorkflowRun{Id: id, Name: fmt.Sprintf("run-%d", id)},
+			},
+		})
+	}
+
+	gr := c.github.repos[GitHubRepoID{"golang", "go"}]
+	var ids []int64
+	gr.ForeachWorkflowRun(func(r *GitHubWorkflowRun) error {
+		ids = append(ids, r.ID)
+		return nil
+	})
+	want := []int64{100, 200, 300}
+	if !reflect.DeepEqual(ids, want) {
+		t.Errorf("ForeachWorkflowRun IDs = %v; want %v", ids, want)
+	}
+}

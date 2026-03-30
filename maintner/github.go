@@ -108,11 +108,12 @@ func (g *GitHub) getOrCreateRepo(owner, repo string) *GitHubRepo {
 }
 
 type GitHubRepo struct {
-	github     *GitHub
-	id         GitHubRepoID
-	issues     map[int32]*GitHubIssue // num -> issue
-	milestones map[int64]*GitHubMilestone
-	labels     map[int64]*GitHubLabel
+	github       *GitHub
+	id           GitHubRepoID
+	issues       map[int32]*GitHubIssue // num -> issue
+	milestones   map[int64]*GitHubMilestone
+	labels       map[int64]*GitHubLabel
+	workflowRuns map[int64]*GitHubWorkflowRun // run ID -> run
 }
 
 func (gr *GitHubRepo) ID() GitHubRepoID { return gr.id }
@@ -159,6 +160,37 @@ func (gr *GitHubRepo) ForeachIssue(fn func(*GitHubIssue) error) error {
 	sort.Slice(s, func(i, j int) bool { return s[i].Number < s[j].Number })
 	for _, gi := range s {
 		if err := fn(gi); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ForeachWorkflowRun calls fn for each workflow run in the repo,
+// sorted by run ID.
+func (gr *GitHubRepo) ForeachWorkflowRun(fn func(*GitHubWorkflowRun) error) error {
+	s := make([]*GitHubWorkflowRun, 0, len(gr.workflowRuns))
+	for _, r := range gr.workflowRuns {
+		s = append(s, r)
+	}
+	sort.Slice(s, func(i, j int) bool { return s[i].ID < s[j].ID })
+	for _, r := range s {
+		if err := fn(r); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ForeachJob calls fn for each job in the workflow run, sorted by job ID.
+func (r *GitHubWorkflowRun) ForeachJob(fn func(*GitHubWorkflowJob) error) error {
+	s := make([]*GitHubWorkflowJob, 0, len(r.Jobs))
+	for _, j := range r.Jobs {
+		s = append(s, j)
+	}
+	sort.Slice(s, func(i, j int) bool { return s[i].ID < s[j].ID })
+	for _, j := range s {
+		if err := fn(j); err != nil {
 			return err
 		}
 	}
@@ -665,6 +697,51 @@ type GitHubReaction struct {
 	Created time.Time
 }
 
+// GitHubWorkflowRun represents a GitHub Actions workflow run.
+type GitHubWorkflowRun struct {
+	ID         int64
+	Name       string  // workflow name
+	HeadBranch string
+	HeadSHA    GitHash
+	Event      string // "push", "pull_request", etc.
+	Status     string // "completed", "in_progress", "queued"
+	Conclusion string // "success", "failure", "cancelled", etc.
+	WorkflowID int64
+	RunNumber  int64
+	RunAttempt int64
+	Created    time.Time
+	Updated    time.Time
+	RunStarted time.Time // when execution began (Created to RunStarted = queue time)
+	ActorID    int64
+	HTMLURL    string
+	PRNumbers  []int32 // associated pull request numbers
+	Jobs       map[int64]*GitHubWorkflowJob
+}
+
+// GitHubWorkflowJob represents an individual job within a workflow run.
+type GitHubWorkflowJob struct {
+	ID         int64
+	RunID      int64
+	Name       string
+	Status     string // "queued", "in_progress", "completed"
+	Conclusion string // "success", "failure", etc.
+	Started    time.Time
+	Completed  time.Time
+	RunnerName string
+	Labels     []string
+	Steps      []*GitHubWorkflowStep
+}
+
+// GitHubWorkflowStep represents a step within a workflow job.
+type GitHubWorkflowStep struct {
+	Name       string
+	Status     string
+	Conclusion string
+	Number     int64
+	Started    time.Time
+	Completed  time.Time
+}
+
 // GitHubDismissedReviewEvent is the contents of a dismissed review event. For more
 // details, see https://developer.github.com/v3/issues/events/.
 type GitHubDismissedReviewEvent struct {
@@ -895,7 +972,15 @@ func (c *Corpus) TrackGitHub(owner, repo, token string) {
 // TrackGitHubWithTokenSource registers the named GitHub repo as a repo to
 // watch and append to the mutation log. Only valid in leader mode.
 // The tokenSource is used to obtain auth tokens for GitHub API calls.
+// All default sync categories are enabled (everything except Actions).
 func (c *Corpus) TrackGitHubWithTokenSource(owner, repo string, tokenSource oauth2.TokenSource) {
+	c.TrackGitHubWithOptions(owner, repo, tokenSource, nil)
+}
+
+// TrackGitHubWithOptions is like TrackGitHubWithTokenSource but accepts
+// a GitHubSyncFilter to control which categories of data are synced.
+// A nil filter uses DefaultGitHubSyncFilter.
+func (c *Corpus) TrackGitHubWithOptions(owner, repo string, tokenSource oauth2.TokenSource, filter *GitHubSyncFilter) {
 	if c.mutationLogger == nil {
 		panic("can't TrackGitHub in non-leader mode")
 	}
@@ -910,12 +995,53 @@ func (c *Corpus) TrackGitHubWithTokenSource(owner, repo string, tokenSource oaut
 	c.watchedGithubRepos = append(c.watchedGithubRepos, watchedGithubRepo{
 		gr:          gr,
 		tokenSource: tokenSource,
+		filter:      filter,
 	})
 }
 
 type watchedGithubRepo struct {
 	gr          *GitHubRepo
 	tokenSource oauth2.TokenSource
+	filter      *GitHubSyncFilter // nil means default
+}
+
+// GitHubSyncFilter controls which categories of GitHub data are synced
+// for a repo. A nil filter uses DefaultGitHubSyncFilter (everything
+// except Actions). Use DefaultGitHubSyncFilter to get a filter with
+// the current defaults, then customize it.
+type GitHubSyncFilter struct {
+	Issues    bool // issues + PRs (the issue metadata itself)
+	Comments  bool // issue/PR comments
+	Events    bool // issue timeline events
+	Reviews   bool // PR reviews
+	PRDetails bool // PR merge/branch metadata
+	Reactions bool // emoji reactions
+	Actions   bool // workflow runs and jobs
+
+	// ActionsSince, if non-zero, overrides the Actions sync start time
+	// instead of deriving it from the corpus. Useful for backfilling gaps.
+	ActionsSince time.Time
+
+	// ActionsBackfillGaps, if true, uses a gap-filling strategy instead
+	// of linear time-window walking. It finds the largest time gaps in
+	// the corpus data and fills them first, repeatedly, until all gaps
+	// are under 1 hour or no new data is found.
+	// ActionsSince must be set to define the oldest boundary.
+	ActionsBackfillGaps bool
+}
+
+// DefaultGitHubSyncFilter returns a filter matching the current default
+// behavior: everything enabled except Actions.
+func DefaultGitHubSyncFilter() *GitHubSyncFilter {
+	return &GitHubSyncFilter{
+		Issues:    true,
+		Comments:  true,
+		Events:    true,
+		Reviews:   true,
+		PRDetails: true,
+		Reactions: true,
+		Actions:   false,
+	}
 }
 
 // g.c.mu must be held
@@ -1642,7 +1768,7 @@ func (c *githubCache) Set(urlKey string, res []byte) {
 // sync checks for new changes on a single GitHub repository and
 // updates the Corpus with any changes. If loop is true, it runs
 // forever.
-func (gr *GitHubRepo) sync(ctx context.Context, tokenSource oauth2.TokenSource, loop bool) error {
+func (gr *GitHubRepo) sync(ctx context.Context, tokenSource oauth2.TokenSource, filter *GitHubSyncFilter, loop bool) error {
 	base := gr.github.c.githubBaseTransport
 	if base == nil {
 		base = http.DefaultTransport
@@ -1665,6 +1791,7 @@ func (gr *GitHubRepo) sync(ctx context.Context, tokenSource oauth2.TokenSource, 
 		c:             gr.github.c,
 		tokenSource:   tokenSource,
 		gr:            gr,
+		syncFilter:    filter,
 		githubDirect:  github.NewClient(&http.Client{Transport: directTransport}),
 		githubCaching: github.NewClient(&http.Client{Transport: cachingTransport}),
 		client:        &http.Client{Transport: directTransport},
@@ -1725,7 +1852,8 @@ type githubRepoPoller struct {
 	c             *Corpus // shortcut for gr.github.c
 	gr            *GitHubRepo
 	tokenSource   oauth2.TokenSource
-	lastUpdate    time.Time // modified by sync
+	syncFilter    *GitHubSyncFilter // nil means default
+	lastUpdate    time.Time         // modified by sync
 	githubCaching *github.Client
 	githubDirect  *github.Client // not caching
 	client        httpClient     // the client used to poll github
@@ -1737,6 +1865,14 @@ type githubRepoPoller struct {
 	lastReactionScan    time.Time      // when the last full GraphQL scan ran
 }
 
+// filter returns the effective sync filter, defaulting if nil.
+func (p *githubRepoPoller) filter() *GitHubSyncFilter {
+	if p.syncFilter != nil {
+		return p.syncFilter
+	}
+	return DefaultGitHubSyncFilter()
+}
+
 func (p *githubRepoPoller) Owner() string { return p.gr.id.Owner }
 func (p *githubRepoPoller) Repo() string  { return p.gr.id.Repo }
 
@@ -1746,24 +1882,42 @@ func (p *githubRepoPoller) logf(format string, args ...any) {
 
 func (p *githubRepoPoller) sync(ctx context.Context, expectChanges bool) error {
 	p.logf("Beginning sync.")
-	p.staleReactionIssues = make(map[int32]bool) // reset per cycle
-	if err := p.syncIssues(ctx, expectChanges); err != nil {
-		return err
+	f := p.filter()
+	if f.Issues {
+		p.staleReactionIssues = make(map[int32]bool) // reset per cycle
+		if err := p.syncIssues(ctx, expectChanges); err != nil {
+			return err
+		}
 	}
-	if err := p.syncComments(ctx); err != nil {
-		return err
+	if f.Comments {
+		if err := p.syncComments(ctx); err != nil {
+			return err
+		}
 	}
-	if err := p.syncEvents(ctx); err != nil {
-		return err
+	if f.Events {
+		if err := p.syncEvents(ctx); err != nil {
+			return err
+		}
 	}
-	if err := p.syncReviews(ctx); err != nil {
-		return err
+	if f.Reviews {
+		if err := p.syncReviews(ctx); err != nil {
+			return err
+		}
 	}
-	if err := p.syncPullRequests(ctx); err != nil {
-		return err
+	if f.PRDetails {
+		if err := p.syncPullRequests(ctx); err != nil {
+			return err
+		}
 	}
-	if err := p.syncReactions(ctx); err != nil {
-		return err
+	if f.Reactions {
+		if err := p.syncReactions(ctx); err != nil {
+			return err
+		}
+	}
+	if f.Actions {
+		if err := p.syncActions(ctx); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -1799,6 +1953,18 @@ func (p *githubRepoPoller) issueNumbersWithStalePRDetails() (issueNums []int32) 
 
 func (p *githubRepoPoller) syncPullRequestDetails(ctx context.Context, issueNum int32) error {
 	pr, resp, err := p.githubDirect.PullRequests.Get(ctx, p.Owner(), p.Repo(), int(issueNum))
+	if isIssueGoneError(err) {
+		p.logf("PR %d is gone (404/410/301), marking as NotExist", issueNum)
+		p.c.addMutation(&maintpb.Mutation{
+			GithubIssue: &maintpb.GithubIssueMutation{
+				Owner:    p.Owner(),
+				Repo:     p.Repo(),
+				Number:   issueNum,
+				NotExist: true,
+			},
+		})
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("fetching PR %d: %w", issueNum, err)
 	}
@@ -1915,6 +2081,543 @@ func (b GitHubPullRequestBranch) proto() *maintpb.GithubPullRequestBranch {
 		Owner: b.Owner,
 		Repo:  b.Repo,
 	}
+}
+
+// processGithubActionsMutation updates the corpus with Actions data.
+func (c *Corpus) processGithubActionsMutation(m *maintpb.GithubActionsMutation) {
+	if c == nil {
+		panic("nil corpus")
+	}
+	c.initGithub()
+	gr := c.github.getOrCreateRepo(m.Owner, m.Repo)
+	if gr == nil {
+		log.Printf("bogus Owner/Repo %q/%q in actions mutation", m.Owner, m.Repo)
+		return
+	}
+
+	if rm := m.Run; rm != nil {
+		if gr.workflowRuns == nil {
+			gr.workflowRuns = make(map[int64]*GitHubWorkflowRun)
+		}
+		run, ok := gr.workflowRuns[rm.Id]
+		if !ok {
+			run = &GitHubWorkflowRun{ID: rm.Id}
+			gr.workflowRuns[rm.Id] = run
+		}
+		if rm.Name != "" {
+			run.Name = rm.Name
+		}
+		if rm.HeadBranch != "" {
+			run.HeadBranch = rm.HeadBranch
+		}
+		if rm.HeadHash != "" {
+			run.HeadSHA = GitHash(rm.HeadHash)
+		}
+		if rm.Event != "" {
+			run.Event = rm.Event
+		}
+		if rm.Status != "" {
+			run.Status = rm.Status
+		}
+		if rm.Conclusion != "" {
+			run.Conclusion = rm.Conclusion
+		}
+		if rm.WorkflowId != 0 {
+			run.WorkflowID = rm.WorkflowId
+		}
+		if rm.RunNumber != 0 {
+			run.RunNumber = rm.RunNumber
+		}
+		if rm.RunAttempt != 0 {
+			run.RunAttempt = rm.RunAttempt
+		}
+		if rm.Created != nil {
+			run.Created = rm.Created.AsTime()
+		}
+		if rm.Updated != nil {
+			run.Updated = rm.Updated.AsTime()
+		}
+		if rm.RunStarted != nil {
+			run.RunStarted = rm.RunStarted.AsTime()
+		}
+		if rm.ActorId != 0 {
+			run.ActorID = rm.ActorId
+		}
+		if rm.Url != "" {
+			run.HTMLURL = rm.Url
+		}
+		if len(rm.PullRequestNumbers) > 0 {
+			run.PRNumbers = make([]int32, len(rm.PullRequestNumbers))
+			for i, n := range rm.PullRequestNumbers {
+				run.PRNumbers[i] = int32(n)
+			}
+		}
+	}
+
+	if jm := m.Job; jm != nil {
+		run := gr.workflowRuns[jm.RunId]
+		if run == nil {
+			// Job arrived before its run; create a placeholder.
+			if gr.workflowRuns == nil {
+				gr.workflowRuns = make(map[int64]*GitHubWorkflowRun)
+			}
+			run = &GitHubWorkflowRun{ID: jm.RunId}
+			gr.workflowRuns[jm.RunId] = run
+		}
+		if run.Jobs == nil {
+			run.Jobs = make(map[int64]*GitHubWorkflowJob)
+		}
+		job, ok := run.Jobs[jm.Id]
+		if !ok {
+			job = &GitHubWorkflowJob{ID: jm.Id, RunID: jm.RunId}
+			run.Jobs[jm.Id] = job
+		}
+		if jm.Name != "" {
+			job.Name = jm.Name
+		}
+		if jm.Status != "" {
+			job.Status = jm.Status
+		}
+		if jm.Conclusion != "" {
+			job.Conclusion = jm.Conclusion
+		}
+		if jm.Started != nil {
+			job.Started = jm.Started.AsTime()
+		}
+		if jm.Completed != nil {
+			job.Completed = jm.Completed.AsTime()
+		}
+		if jm.RunnerName != "" {
+			job.RunnerName = jm.RunnerName
+		}
+		if len(jm.Labels) > 0 {
+			job.Labels = jm.Labels
+		}
+		if len(jm.Step) > 0 {
+			job.Steps = make([]*GitHubWorkflowStep, len(jm.Step))
+			for i, sm := range jm.Step {
+				job.Steps[i] = &GitHubWorkflowStep{
+					Name:       sm.Name,
+					Status:     sm.Status,
+					Conclusion: sm.Conclusion,
+					Number:     sm.Number,
+				}
+				if sm.Started != nil {
+					job.Steps[i].Started = sm.Started.AsTime()
+				}
+				if sm.Completed != nil {
+					job.Steps[i].Completed = sm.Completed.AsTime()
+				}
+			}
+		}
+	}
+}
+
+// syncActions fetches GitHub Actions workflow runs and jobs.
+func (p *githubRepoPoller) syncActions(ctx context.Context) error {
+	return p.syncWorkflowRuns(ctx)
+}
+
+// maxActionsAge is how far back to sync workflow runs on initial sync.
+const maxActionsAge = 6 * 30 * 24 * time.Hour // ~6 months
+
+func (p *githubRepoPoller) syncWorkflowRuns(ctx context.Context) error {
+	p.logf("syncing Actions workflow runs")
+
+	f := p.filter()
+	if f.ActionsBackfillGaps {
+		return p.syncWorkflowRunsBackfillGaps(ctx)
+	}
+
+	now := time.Now().UTC()
+
+	// Determine start time: explicit override > corpus max > 6 months ago.
+	var since time.Time
+	if !f.ActionsSince.IsZero() {
+		since = f.ActionsSince
+		p.logf("Actions: backfill from %s (--actions-since override, %d runs in corpus)",
+			since.Format("2006-01-02"), len(p.gr.workflowRuns))
+	} else {
+		p.c.mu.RLock()
+		for _, run := range p.gr.workflowRuns {
+			if run.Created.After(since) {
+				since = run.Created
+			}
+		}
+		p.c.mu.RUnlock()
+
+		if since.IsZero() {
+			since = now.Add(-maxActionsAge)
+			p.logf("Actions: initial sync, fetching runs back to %s", since.Format("2006-01-02"))
+		} else {
+			// Back up one day to catch any runs created near the boundary
+			// that might have been updated since.
+			since = since.Add(-24 * time.Hour)
+			p.logf("Actions: incremental sync from %s (%d runs in corpus)",
+				since.Format("2006-01-02"), len(p.gr.workflowRuns))
+		}
+	}
+
+	// Walk forward in 1-day windows from `since` to now.
+	// The GitHub API caps results at 1000 per query (10 pages of 100),
+	// so daily windows are needed for repos with high CI volume.
+	var totalNew, totalSkipped int
+
+	// Use a stack of time windows. Start with daily windows.
+	// If any window hits the 1000-result API cap, split it in half.
+	type window struct{ start, end time.Time }
+	var windows []window
+	for ws := since; ws.Before(now); ws = ws.Add(24 * time.Hour) {
+		we := ws.Add(24 * time.Hour)
+		if we.After(now) {
+			we = now
+		}
+		windows = append(windows, window{ws, we})
+	}
+
+	for len(windows) > 0 {
+		w := windows[0]
+		windows = windows[1:]
+
+		windowNew, windowTotal, err := p.syncWorkflowRunsWindow(ctx, w.start, w.end, &totalNew, &totalSkipped)
+		if err != nil {
+			return err
+		}
+
+		// If we hit the 1000-result cap and the window is wider than 1 hour,
+		// split it in half and retry both halves.
+		if windowTotal >= 1000 && w.end.Sub(w.start) > time.Hour {
+			mid := w.start.Add(w.end.Sub(w.start) / 2)
+			p.logf("Actions: window %s..%s had %d results (cap 1000), splitting",
+				w.start.Format("2006-01-02T15:04"), w.end.Format("2006-01-02T15:04"), windowTotal)
+			// Undo the mutations we already emitted? No — they're fine, we just
+			// need to also fetch the ones we missed. The second pass will skip
+			// already-known runs. Prepend both halves.
+			windows = append([]window{{w.start, mid}, {mid, w.end}}, windows...)
+			continue
+		}
+		_ = windowNew
+	}
+
+	p.logf("Actions: done. %d new runs synced, %d unchanged", totalNew, totalSkipped)
+	return nil
+}
+
+// retryGitHubAPI retries fn on transient errors (5xx, network) with
+// exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s.
+// Returns the last error if all retries fail.
+func retryGitHubAPI[T any](ctx context.Context, desc string, fn func() (T, *github.Response, error)) (T, *github.Response, error) {
+	const maxAttempts = 7 // 1 initial + 6 retries (up to 32s backoff)
+	var zero T
+	for attempt := range maxAttempts {
+		result, resp, err := fn()
+		if err == nil {
+			return result, resp, nil
+		}
+		if ctx.Err() != nil {
+			return zero, nil, ctx.Err()
+		}
+		// Retry on 5xx or network errors, not on 4xx.
+		if resp != nil && resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			return zero, resp, err
+		}
+		if attempt < maxAttempts-1 {
+			delay := time.Duration(1<<attempt) * time.Second // 1s, 2s, 4s, 8s, 16s, 32s
+			log.Printf("%s: transient error (attempt %d/%d): %v; retrying in %v", desc, attempt+1, maxAttempts, err, delay)
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return zero, nil, ctx.Err()
+			}
+			continue
+		}
+		return zero, resp, err
+	}
+	return zero, nil, fmt.Errorf("unreachable")
+}
+
+// syncWorkflowRunsBackfillGaps finds the largest time gaps in the corpus
+// and fills them first, repeating until all gaps are under 1 hour or
+// no new data is found in any gap over 1 hour.
+func (p *githubRepoPoller) syncWorkflowRunsBackfillGaps(ctx context.Context) error {
+	f := p.filter()
+	if f.ActionsSince.IsZero() {
+		return fmt.Errorf("ActionsBackfillGaps requires ActionsSince to be set")
+	}
+
+	oldest := f.ActionsSince
+	now := time.Now().UTC()
+
+	for round := 1; ; round++ {
+		// Collect all known run Created times from the corpus.
+		p.c.mu.RLock()
+		times := make([]time.Time, 0, len(p.gr.workflowRuns)+2)
+		times = append(times, oldest) // synthetic: left boundary
+		times = append(times, now)    // synthetic: right boundary
+		for _, run := range p.gr.workflowRuns {
+			if !run.Created.IsZero() {
+				times = append(times, run.Created)
+			}
+		}
+		corpusSize := len(p.gr.workflowRuns)
+		p.c.mu.RUnlock()
+
+		sort.Slice(times, func(i, j int) bool { return times[i].Before(times[j]) })
+
+		// Compute gaps between consecutive points, keep those > 1 hour.
+		type gap struct {
+			start, end time.Time
+			dur        time.Duration
+		}
+		var gaps []gap
+		for i := 1; i < len(times); i++ {
+			d := times[i].Sub(times[i-1])
+			if d > time.Hour {
+				gaps = append(gaps, gap{times[i-1], times[i], d})
+			}
+		}
+
+		if len(gaps) == 0 {
+			p.logf("Actions backfill: round %d — no gaps > 1h remain (%d runs in corpus)", round, corpusSize)
+			return nil
+		}
+
+		// Sort gaps by duration, largest first.
+		sort.Slice(gaps, func(i, j int) bool { return gaps[i].dur > gaps[j].dur })
+
+		p.logf("Actions backfill: round %d — %d gaps > 1h, largest: %s (%s to %s), %d runs in corpus",
+			round, len(gaps), gaps[0].dur.Round(time.Minute), gaps[0].start.Format("2006-01-02T15:04"), gaps[0].end.Format("2006-01-02T15:04"), corpusSize)
+
+		// Attack the largest gap using daily windows from the start.
+		g := gaps[0]
+		gapNew, err := p.backfillGap(ctx, g.start, g.end)
+		if err != nil {
+			return err
+		}
+
+		if gapNew == 0 {
+			// No new data in the largest gap. Check other gaps.
+			anyNew := false
+			for _, g2 := range gaps[1:] {
+				n2, err := p.backfillGap(ctx, g2.start, g2.end)
+				if err != nil {
+					return err
+				}
+				if n2 > 0 {
+					anyNew = true
+					p.logf("Actions backfill: gap %s..%s: %d new",
+						g2.start.Format("2006-01-02T15:04"), g2.end.Format("2006-01-02T15:04"), n2)
+					break
+				}
+			}
+			if !anyNew {
+				p.logf("Actions backfill: no new data in any gap > 1h; done (%d runs in corpus)", corpusSize)
+				return nil
+			}
+		}
+	}
+}
+
+// backfillGap probes a time range for runs, then walks it with daily windows.
+// Returns the number of new runs found. Skips the gap entirely if the API
+// reports 0 total runs in the range.
+func (p *githubRepoPoller) backfillGap(ctx context.Context, start, end time.Time) (int, error) {
+	// Probe: single API call to check if there's anything in this range.
+	created := start.Format("2006-01-02T15:04:05Z") + ".." + end.Format("2006-01-02T15:04:05Z")
+	probe, _, err := retryGitHubAPI(ctx, "probing gap", func() (*github.WorkflowRuns, *github.Response, error) {
+		return p.githubDirect.Actions.ListRepositoryWorkflowRuns(ctx, p.Owner(), p.Repo(), &github.ListWorkflowRunsOptions{
+			Created:     created,
+			ListOptions: github.ListOptions{PerPage: 1},
+		})
+	})
+	if err != nil {
+		return 0, err
+	}
+	if probe.GetTotalCount() == 0 {
+		p.logf("Actions backfill: gap %s..%s (%s): empty, skipping",
+			start.Format("2006-01-02T15:04"), end.Format("2006-01-02T15:04"),
+			end.Sub(start).Round(time.Minute))
+		return 0, nil
+	}
+	p.logf("Actions backfill: gap %s..%s (%s): ~%d runs, walking daily",
+		start.Format("2006-01-02T15:04"), end.Format("2006-01-02T15:04"),
+		end.Sub(start).Round(time.Minute), probe.GetTotalCount())
+
+	var totalNew, totalSkipped int
+	ws := start
+	for ws.Before(end) {
+		we := ws.Add(24 * time.Hour)
+		if we.After(end) {
+			we = end
+		}
+		_, _, err := p.syncWorkflowRunsWindow(ctx, ws, we, &totalNew, &totalSkipped)
+		if err != nil {
+			return totalNew, err
+		}
+		ws = we
+	}
+
+	p.logf("Actions backfill: gap %s..%s: %d new, %d skipped",
+		start.Format("2006-01-02T15:04"), end.Format("2006-01-02T15:04"),
+		totalNew, totalSkipped)
+	return totalNew, nil
+}
+
+// syncWorkflowRunsWindow fetches all workflow runs in [start, end) and returns
+// the count of new runs, total runs seen, and any error.
+func (p *githubRepoPoller) syncWorkflowRunsWindow(ctx context.Context, start, end time.Time, totalNew, totalSkipped *int) (windowNew, windowTotal int, _ error) {
+	created := start.Format("2006-01-02T15:04:05Z") + ".." + end.Format("2006-01-02T15:04:05Z")
+	opts := &github.ListWorkflowRunsOptions{
+		Created:     created,
+		ListOptions: github.ListOptions{PerPage: 100},
+	}
+
+	for {
+		runs, runsResp, err := retryGitHubAPI(ctx, "listing workflow runs", func() (*github.WorkflowRuns, *github.Response, error) {
+			return p.githubDirect.Actions.ListRepositoryWorkflowRuns(ctx, p.Owner(), p.Repo(), opts)
+		})
+		if err != nil {
+			return windowNew, windowTotal, fmt.Errorf("listing workflow runs: %w", err)
+		}
+
+		pageNew, pageSkipped := 0, 0
+		for _, run := range runs.WorkflowRuns {
+			windowTotal++
+
+			p.c.mu.RLock()
+			existing := p.gr.workflowRuns[run.GetID()]
+			p.c.mu.RUnlock()
+
+			if existing != nil && existing.Updated.Equal(run.GetUpdatedAt().Time) {
+				*totalSkipped++
+				pageSkipped++
+				continue
+			}
+
+			runMut := workflowRunToProto(run)
+			p.c.addMutation(&maintpb.Mutation{
+				GithubActions: &maintpb.GithubActionsMutation{
+					Owner: p.Owner(),
+					Repo:  p.Repo(),
+					Run:   runMut,
+				},
+			})
+
+			if err := p.syncWorkflowJobs(ctx, run.GetID()); err != nil {
+				return windowNew, windowTotal, err
+			}
+			*totalNew++
+			windowNew++
+			pageNew++
+		}
+
+		p.logf("Actions: %s — page %d: %d new, %d skipped (total: %d new, %d skipped)",
+			start.Format("2006-01-02T15:04"), opts.Page, pageNew, pageSkipped, *totalNew, *totalSkipped)
+
+		if runsResp.NextPage == 0 {
+			break
+		}
+		opts.Page = runsResp.NextPage
+	}
+	return windowNew, windowTotal, nil
+}
+
+func (p *githubRepoPoller) syncWorkflowJobs(ctx context.Context, runID int64) error {
+	opts := &github.ListWorkflowJobsOptions{
+		Filter:      "latest",
+		ListOptions: github.ListOptions{PerPage: 100},
+	}
+	for {
+		jobs, jobsResp, err := retryGitHubAPI(ctx, fmt.Sprintf("listing jobs for run %d", runID), func() (*github.Jobs, *github.Response, error) {
+			return p.githubDirect.Actions.ListWorkflowJobs(ctx, p.Owner(), p.Repo(), runID, opts)
+		})
+		if err != nil {
+			return fmt.Errorf("listing workflow jobs for run %d: %w", runID, err)
+		}
+		for _, job := range jobs.Jobs {
+			jobMut := workflowJobToProto(job)
+			p.c.addMutation(&maintpb.Mutation{
+				GithubActions: &maintpb.GithubActionsMutation{
+					Owner: p.Owner(),
+					Repo:  p.Repo(),
+					Job:   jobMut,
+				},
+			})
+		}
+		if jobsResp.NextPage == 0 {
+			break
+		}
+		opts.Page = jobsResp.NextPage
+	}
+	return nil
+}
+
+func workflowRunToProto(run *github.WorkflowRun) *maintpb.GithubWorkflowRun {
+	m := &maintpb.GithubWorkflowRun{
+		Id:         run.GetID(),
+		Name:       run.GetName(),
+		HeadBranch: run.GetHeadBranch(),
+		HeadHash:   run.GetHeadSHA(),
+		Event:      run.GetEvent(),
+		Status:     run.GetStatus(),
+		Conclusion: run.GetConclusion(),
+		WorkflowId: run.GetWorkflowID(),
+		RunNumber:  int64(run.GetRunNumber()),
+		RunAttempt: int64(run.GetRunAttempt()),
+		Url:        run.GetHTMLURL(),
+	}
+	if run.Actor != nil {
+		m.ActorId = run.Actor.GetID()
+	}
+	if t := run.GetCreatedAt(); !t.Time.IsZero() {
+		m.Created = timestamppb.New(t.Time)
+	}
+	if t := run.GetUpdatedAt(); !t.Time.IsZero() {
+		m.Updated = timestamppb.New(t.Time)
+	}
+	if t := run.GetRunStartedAt(); !t.Time.IsZero() {
+		m.RunStarted = timestamppb.New(t.Time)
+	}
+	for _, pr := range run.PullRequests {
+		if pr.Number != nil {
+			m.PullRequestNumbers = append(m.PullRequestNumbers, int64(*pr.Number))
+		}
+	}
+	return m
+}
+
+func workflowJobToProto(job *github.WorkflowJob) *maintpb.GithubWorkflowJob {
+	m := &maintpb.GithubWorkflowJob{
+		Id:         job.GetID(),
+		RunId:      job.GetRunID(),
+		Name:       job.GetName(),
+		Status:     job.GetStatus(),
+		Conclusion: job.GetConclusion(),
+		RunnerName: job.GetRunnerName(),
+		Labels:     job.Labels,
+	}
+	if t := job.StartedAt; t != nil {
+		m.Started = timestamppb.New(t.Time)
+	}
+	if t := job.CompletedAt; t != nil {
+		m.Completed = timestamppb.New(t.Time)
+	}
+	for _, step := range job.Steps {
+		sm := &maintpb.GithubWorkflowStep{
+			Name:       step.GetName(),
+			Status:     step.GetStatus(),
+			Conclusion: step.GetConclusion(),
+			Number:     int64(step.GetNumber()),
+		}
+		if t := step.StartedAt; t != nil {
+			sm.Started = timestamppb.New(t.Time)
+		}
+		if t := step.CompletedAt; t != nil {
+			sm.Completed = timestamppb.New(t.Time)
+		}
+		m.Step = append(m.Step, sm)
+	}
+	return m
 }
 
 func (p *githubRepoPoller) syncMilestones(ctx context.Context) error {

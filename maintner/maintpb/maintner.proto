@@ -14,6 +14,7 @@ option go_package = "golang.org/x/build/maintner/maintpb";
 message Mutation {
   GithubIssueMutation github_issue = 1; // issue-specific changes
   GithubMutation github = 3; // labels, milestones (not issue-specific)
+  GithubActionsMutation github_actions = 5; // workflow runs and jobs
 
   GitMutation git = 2;
   GerritMutation gerrit = 4;
@@ -359,4 +360,53 @@ message GitRef {
   // hash is the lowercase hex object hash.
   // Typically 40 hex bytes (SHA-1) but may be longer for SHA-256 repos.
   string hash = 2;
+}
+
+// GithubActionsMutation records a GitHub Actions workflow run or job.
+message GithubActionsMutation {
+  string owner = 1;
+  string repo = 2;
+  GithubWorkflowRun run = 3;
+  GithubWorkflowJob job = 4;
+}
+
+message GithubWorkflowRun {
+  int64 id = 1;
+  string name = 2;              // workflow name
+  string head_branch = 3;
+  string head_hash = 4;         // commit SHA
+  string event = 5;             // "push", "pull_request", etc.
+  string status = 6;            // "completed", "in_progress", "queued"
+  string conclusion = 7;        // "success", "failure", "cancelled", etc.
+  int64 workflow_id = 8;
+  int64 run_number = 9;
+  int64 run_attempt = 10;
+  google.protobuf.Timestamp created = 11;
+  google.protobuf.Timestamp updated = 12;
+  google.protobuf.Timestamp run_started = 13;
+  int64 actor_id = 14;
+  string url = 15;              // html_url
+  repeated int64 pull_request_numbers = 16;
+}
+
+message GithubWorkflowJob {
+  int64 id = 1;
+  int64 run_id = 2;
+  string name = 3;
+  string status = 4;            // "queued", "in_progress", "completed"
+  string conclusion = 5;        // "success", "failure", etc.
+  google.protobuf.Timestamp started = 6;
+  google.protobuf.Timestamp completed = 7;
+  string runner_name = 8;
+  repeated string labels = 9;   // runner labels
+  repeated GithubWorkflowStep step = 10;
+}
+
+message GithubWorkflowStep {
+  string name = 1;
+  string status = 2;
+  string conclusion = 3;
+  int64 number = 4;
+  google.protobuf.Timestamp started = 5;
+  google.protobuf.Timestamp completed = 6;
 }

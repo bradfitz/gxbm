@@ -434,6 +434,9 @@ func (c *Corpus) processMutationLocked(m *maintpb.Mutation) {
 	if gm := m.Gerrit; gm != nil {
 		c.processGerritMutation(gm)
 	}
+	if am := m.GithubActions; am != nil {
+		c.processGithubActionsMutation(am)
+	}
 }
 
 // finishProcessing fixes up invariants and data structures before
@@ -462,11 +465,11 @@ func (c *Corpus) sync(ctx context.Context, loop bool) error {
 
 	group, ctx := errgroup.WithContext(ctx)
 	for _, w := range c.watchedGithubRepos {
-		gr, ts := w.gr, w.tokenSource
+		gr, ts, filter := w.gr, w.tokenSource, w.filter
 		group.Go(func() error {
 			log.Printf("Polling %v ...", gr.id)
 			for {
-				err := gr.sync(ctx, ts, loop)
+				err := gr.sync(ctx, ts, filter, loop)
 				if loop && isTempErr(err) {
 					log.Printf("Temporary error from github %v: %v", gr.ID(), err)
 					time.Sleep(30 * time.Second)

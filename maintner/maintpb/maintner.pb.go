@@ -30,8 +30,9 @@ const (
 
 type Mutation struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	GithubIssue   *GithubIssueMutation   `protobuf:"bytes,1,opt,name=github_issue,json=githubIssue,proto3" json:"github_issue,omitempty"` // issue-specific changes
-	Github        *GithubMutation        `protobuf:"bytes,3,opt,name=github,proto3" json:"github,omitempty"`                              // labels, milestones (not issue-specific)
+	GithubIssue   *GithubIssueMutation   `protobuf:"bytes,1,opt,name=github_issue,json=githubIssue,proto3" json:"github_issue,omitempty"`       // issue-specific changes
+	Github        *GithubMutation        `protobuf:"bytes,3,opt,name=github,proto3" json:"github,omitempty"`                                    // labels, milestones (not issue-specific)
+	GithubActions *GithubActionsMutation `protobuf:"bytes,5,opt,name=github_actions,json=githubActions,proto3" json:"github_actions,omitempty"` // workflow runs and jobs
 	Git           *GitMutation           `protobuf:"bytes,2,opt,name=git,proto3" json:"git,omitempty"`
 	Gerrit        *GerritMutation        `protobuf:"bytes,4,opt,name=gerrit,proto3" json:"gerrit,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -78,6 +79,13 @@ func (x *Mutation) GetGithubIssue() *GithubIssueMutation {
 func (x *Mutation) GetGithub() *GithubMutation {
 	if x != nil {
 		return x.Github
+	}
+	return nil
+}
+
+func (x *Mutation) GetGithubActions() *GithubActionsMutation {
+	if x != nil {
+		return x.GithubActions
 	}
 	return nil
 }
@@ -2066,14 +2074,448 @@ func (x *GitRef) GetHash() string {
 	return ""
 }
 
+// GithubActionsMutation records a GitHub Actions workflow run or job.
+type GithubActionsMutation struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Owner         string                 `protobuf:"bytes,1,opt,name=owner,proto3" json:"owner,omitempty"`
+	Repo          string                 `protobuf:"bytes,2,opt,name=repo,proto3" json:"repo,omitempty"`
+	Run           *GithubWorkflowRun     `protobuf:"bytes,3,opt,name=run,proto3" json:"run,omitempty"`
+	Job           *GithubWorkflowJob     `protobuf:"bytes,4,opt,name=job,proto3" json:"job,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GithubActionsMutation) Reset() {
+	*x = GithubActionsMutation{}
+	mi := &file_maintner_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GithubActionsMutation) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GithubActionsMutation) ProtoMessage() {}
+
+func (x *GithubActionsMutation) ProtoReflect() protoreflect.Message {
+	mi := &file_maintner_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GithubActionsMutation.ProtoReflect.Descriptor instead.
+func (*GithubActionsMutation) Descriptor() ([]byte, []int) {
+	return file_maintner_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *GithubActionsMutation) GetOwner() string {
+	if x != nil {
+		return x.Owner
+	}
+	return ""
+}
+
+func (x *GithubActionsMutation) GetRepo() string {
+	if x != nil {
+		return x.Repo
+	}
+	return ""
+}
+
+func (x *GithubActionsMutation) GetRun() *GithubWorkflowRun {
+	if x != nil {
+		return x.Run
+	}
+	return nil
+}
+
+func (x *GithubActionsMutation) GetJob() *GithubWorkflowJob {
+	if x != nil {
+		return x.Job
+	}
+	return nil
+}
+
+type GithubWorkflowRun struct {
+	state              protoimpl.MessageState `protogen:"open.v1"`
+	Id                 int64                  `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
+	Name               string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"` // workflow name
+	HeadBranch         string                 `protobuf:"bytes,3,opt,name=head_branch,json=headBranch,proto3" json:"head_branch,omitempty"`
+	HeadHash           string                 `protobuf:"bytes,4,opt,name=head_hash,json=headHash,proto3" json:"head_hash,omitempty"` // commit SHA
+	Event              string                 `protobuf:"bytes,5,opt,name=event,proto3" json:"event,omitempty"`                       // "push", "pull_request", etc.
+	Status             string                 `protobuf:"bytes,6,opt,name=status,proto3" json:"status,omitempty"`                     // "completed", "in_progress", "queued"
+	Conclusion         string                 `protobuf:"bytes,7,opt,name=conclusion,proto3" json:"conclusion,omitempty"`             // "success", "failure", "cancelled", etc.
+	WorkflowId         int64                  `protobuf:"varint,8,opt,name=workflow_id,json=workflowId,proto3" json:"workflow_id,omitempty"`
+	RunNumber          int64                  `protobuf:"varint,9,opt,name=run_number,json=runNumber,proto3" json:"run_number,omitempty"`
+	RunAttempt         int64                  `protobuf:"varint,10,opt,name=run_attempt,json=runAttempt,proto3" json:"run_attempt,omitempty"`
+	Created            *timestamppb.Timestamp `protobuf:"bytes,11,opt,name=created,proto3" json:"created,omitempty"`
+	Updated            *timestamppb.Timestamp `protobuf:"bytes,12,opt,name=updated,proto3" json:"updated,omitempty"`
+	RunStarted         *timestamppb.Timestamp `protobuf:"bytes,13,opt,name=run_started,json=runStarted,proto3" json:"run_started,omitempty"`
+	ActorId            int64                  `protobuf:"varint,14,opt,name=actor_id,json=actorId,proto3" json:"actor_id,omitempty"`
+	Url                string                 `protobuf:"bytes,15,opt,name=url,proto3" json:"url,omitempty"` // html_url
+	PullRequestNumbers []int64                `protobuf:"varint,16,rep,packed,name=pull_request_numbers,json=pullRequestNumbers,proto3" json:"pull_request_numbers,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
+}
+
+func (x *GithubWorkflowRun) Reset() {
+	*x = GithubWorkflowRun{}
+	mi := &file_maintner_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GithubWorkflowRun) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GithubWorkflowRun) ProtoMessage() {}
+
+func (x *GithubWorkflowRun) ProtoReflect() protoreflect.Message {
+	mi := &file_maintner_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GithubWorkflowRun.ProtoReflect.Descriptor instead.
+func (*GithubWorkflowRun) Descriptor() ([]byte, []int) {
+	return file_maintner_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *GithubWorkflowRun) GetId() int64 {
+	if x != nil {
+		return x.Id
+	}
+	return 0
+}
+
+func (x *GithubWorkflowRun) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *GithubWorkflowRun) GetHeadBranch() string {
+	if x != nil {
+		return x.HeadBranch
+	}
+	return ""
+}
+
+func (x *GithubWorkflowRun) GetHeadHash() string {
+	if x != nil {
+		return x.HeadHash
+	}
+	return ""
+}
+
+func (x *GithubWorkflowRun) GetEvent() string {
+	if x != nil {
+		return x.Event
+	}
+	return ""
+}
+
+func (x *GithubWorkflowRun) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *GithubWorkflowRun) GetConclusion() string {
+	if x != nil {
+		return x.Conclusion
+	}
+	return ""
+}
+
+func (x *GithubWorkflowRun) GetWorkflowId() int64 {
+	if x != nil {
+		return x.WorkflowId
+	}
+	return 0
+}
+
+func (x *GithubWorkflowRun) GetRunNumber() int64 {
+	if x != nil {
+		return x.RunNumber
+	}
+	return 0
+}
+
+func (x *GithubWorkflowRun) GetRunAttempt() int64 {
+	if x != nil {
+		return x.RunAttempt
+	}
+	return 0
+}
+
+func (x *GithubWorkflowRun) GetCreated() *timestamppb.Timestamp {
+	if x != nil {
+		return x.Created
+	}
+	return nil
+}
+
+func (x *GithubWorkflowRun) GetUpdated() *timestamppb.Timestamp {
+	if x != nil {
+		return x.Updated
+	}
+	return nil
+}
+
+func (x *GithubWorkflowRun) GetRunStarted() *timestamppb.Timestamp {
+	if x != nil {
+		return x.RunStarted
+	}
+	return nil
+}
+
+func (x *GithubWorkflowRun) GetActorId() int64 {
+	if x != nil {
+		return x.ActorId
+	}
+	return 0
+}
+
+func (x *GithubWorkflowRun) GetUrl() string {
+	if x != nil {
+		return x.Url
+	}
+	return ""
+}
+
+func (x *GithubWorkflowRun) GetPullRequestNumbers() []int64 {
+	if x != nil {
+		return x.PullRequestNumbers
+	}
+	return nil
+}
+
+type GithubWorkflowJob struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            int64                  `protobuf:"varint,1,opt,name=id,proto3" json:"id,omitempty"`
+	RunId         int64                  `protobuf:"varint,2,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	Name          string                 `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
+	Status        string                 `protobuf:"bytes,4,opt,name=status,proto3" json:"status,omitempty"`         // "queued", "in_progress", "completed"
+	Conclusion    string                 `protobuf:"bytes,5,opt,name=conclusion,proto3" json:"conclusion,omitempty"` // "success", "failure", etc.
+	Started       *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=started,proto3" json:"started,omitempty"`
+	Completed     *timestamppb.Timestamp `protobuf:"bytes,7,opt,name=completed,proto3" json:"completed,omitempty"`
+	RunnerName    string                 `protobuf:"bytes,8,opt,name=runner_name,json=runnerName,proto3" json:"runner_name,omitempty"`
+	Labels        []string               `protobuf:"bytes,9,rep,name=labels,proto3" json:"labels,omitempty"` // runner labels
+	Step          []*GithubWorkflowStep  `protobuf:"bytes,10,rep,name=step,proto3" json:"step,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GithubWorkflowJob) Reset() {
+	*x = GithubWorkflowJob{}
+	mi := &file_maintner_proto_msgTypes[27]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GithubWorkflowJob) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GithubWorkflowJob) ProtoMessage() {}
+
+func (x *GithubWorkflowJob) ProtoReflect() protoreflect.Message {
+	mi := &file_maintner_proto_msgTypes[27]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GithubWorkflowJob.ProtoReflect.Descriptor instead.
+func (*GithubWorkflowJob) Descriptor() ([]byte, []int) {
+	return file_maintner_proto_rawDescGZIP(), []int{27}
+}
+
+func (x *GithubWorkflowJob) GetId() int64 {
+	if x != nil {
+		return x.Id
+	}
+	return 0
+}
+
+func (x *GithubWorkflowJob) GetRunId() int64 {
+	if x != nil {
+		return x.RunId
+	}
+	return 0
+}
+
+func (x *GithubWorkflowJob) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *GithubWorkflowJob) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *GithubWorkflowJob) GetConclusion() string {
+	if x != nil {
+		return x.Conclusion
+	}
+	return ""
+}
+
+func (x *GithubWorkflowJob) GetStarted() *timestamppb.Timestamp {
+	if x != nil {
+		return x.Started
+	}
+	return nil
+}
+
+func (x *GithubWorkflowJob) GetCompleted() *timestamppb.Timestamp {
+	if x != nil {
+		return x.Completed
+	}
+	return nil
+}
+
+func (x *GithubWorkflowJob) GetRunnerName() string {
+	if x != nil {
+		return x.RunnerName
+	}
+	return ""
+}
+
+func (x *GithubWorkflowJob) GetLabels() []string {
+	if x != nil {
+		return x.Labels
+	}
+	return nil
+}
+
+func (x *GithubWorkflowJob) GetStep() []*GithubWorkflowStep {
+	if x != nil {
+		return x.Step
+	}
+	return nil
+}
+
+type GithubWorkflowStep struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Status        string                 `protobuf:"bytes,2,opt,name=status,proto3" json:"status,omitempty"`
+	Conclusion    string                 `protobuf:"bytes,3,opt,name=conclusion,proto3" json:"conclusion,omitempty"`
+	Number        int64                  `protobuf:"varint,4,opt,name=number,proto3" json:"number,omitempty"`
+	Started       *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=started,proto3" json:"started,omitempty"`
+	Completed     *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=completed,proto3" json:"completed,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GithubWorkflowStep) Reset() {
+	*x = GithubWorkflowStep{}
+	mi := &file_maintner_proto_msgTypes[28]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GithubWorkflowStep) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GithubWorkflowStep) ProtoMessage() {}
+
+func (x *GithubWorkflowStep) ProtoReflect() protoreflect.Message {
+	mi := &file_maintner_proto_msgTypes[28]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GithubWorkflowStep.ProtoReflect.Descriptor instead.
+func (*GithubWorkflowStep) Descriptor() ([]byte, []int) {
+	return file_maintner_proto_rawDescGZIP(), []int{28}
+}
+
+func (x *GithubWorkflowStep) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *GithubWorkflowStep) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *GithubWorkflowStep) GetConclusion() string {
+	if x != nil {
+		return x.Conclusion
+	}
+	return ""
+}
+
+func (x *GithubWorkflowStep) GetNumber() int64 {
+	if x != nil {
+		return x.Number
+	}
+	return 0
+}
+
+func (x *GithubWorkflowStep) GetStarted() *timestamppb.Timestamp {
+	if x != nil {
+		return x.Started
+	}
+	return nil
+}
+
+func (x *GithubWorkflowStep) GetCompleted() *timestamppb.Timestamp {
+	if x != nil {
+		return x.Completed
+	}
+	return nil
+}
+
 var File_maintner_proto protoreflect.FileDescriptor
 
 const file_maintner_proto_rawDesc = "" +
 	"\n" +
-	"\x0emaintner.proto\x12\amaintpb\x1a\x1fgoogle/protobuf/timestamp.proto\"\xd5\x01\n" +
+	"\x0emaintner.proto\x12\amaintpb\x1a\x1fgoogle/protobuf/timestamp.proto\"\x9c\x02\n" +
 	"\bMutation\x12?\n" +
 	"\fgithub_issue\x18\x01 \x01(\v2\x1c.maintpb.GithubIssueMutationR\vgithubIssue\x12/\n" +
-	"\x06github\x18\x03 \x01(\v2\x17.maintpb.GithubMutationR\x06github\x12&\n" +
+	"\x06github\x18\x03 \x01(\v2\x17.maintpb.GithubMutationR\x06github\x12E\n" +
+	"\x0egithub_actions\x18\x05 \x01(\v2\x1e.maintpb.GithubActionsMutationR\rgithubActions\x12&\n" +
 	"\x03git\x18\x02 \x01(\v2\x14.maintpb.GitMutationR\x03git\x12/\n" +
 	"\x06gerrit\x18\x04 \x01(\v2\x17.maintpb.GerritMutationR\x06gerrit\"\xa2\x01\n" +
 	"\x0eGithubMutation\x12\x14\n" +
@@ -2243,7 +2685,61 @@ const file_maintner_proto_rawDesc = "" +
 	"\fdeleted_refs\x18\x04 \x03(\tR\vdeletedRefs\".\n" +
 	"\x06GitRef\x12\x10\n" +
 	"\x03ref\x18\x01 \x01(\tR\x03ref\x12\x12\n" +
-	"\x04hash\x18\x02 \x01(\tR\x04hashB%Z#golang.org/x/build/maintner/maintpbb\x06proto3"
+	"\x04hash\x18\x02 \x01(\tR\x04hash\"\x9d\x01\n" +
+	"\x15GithubActionsMutation\x12\x14\n" +
+	"\x05owner\x18\x01 \x01(\tR\x05owner\x12\x12\n" +
+	"\x04repo\x18\x02 \x01(\tR\x04repo\x12,\n" +
+	"\x03run\x18\x03 \x01(\v2\x1a.maintpb.GithubWorkflowRunR\x03run\x12,\n" +
+	"\x03job\x18\x04 \x01(\v2\x1a.maintpb.GithubWorkflowJobR\x03job\"\xac\x04\n" +
+	"\x11GithubWorkflowRun\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12\x1f\n" +
+	"\vhead_branch\x18\x03 \x01(\tR\n" +
+	"headBranch\x12\x1b\n" +
+	"\thead_hash\x18\x04 \x01(\tR\bheadHash\x12\x14\n" +
+	"\x05event\x18\x05 \x01(\tR\x05event\x12\x16\n" +
+	"\x06status\x18\x06 \x01(\tR\x06status\x12\x1e\n" +
+	"\n" +
+	"conclusion\x18\a \x01(\tR\n" +
+	"conclusion\x12\x1f\n" +
+	"\vworkflow_id\x18\b \x01(\x03R\n" +
+	"workflowId\x12\x1d\n" +
+	"\n" +
+	"run_number\x18\t \x01(\x03R\trunNumber\x12\x1f\n" +
+	"\vrun_attempt\x18\n" +
+	" \x01(\x03R\n" +
+	"runAttempt\x124\n" +
+	"\acreated\x18\v \x01(\v2\x1a.google.protobuf.TimestampR\acreated\x124\n" +
+	"\aupdated\x18\f \x01(\v2\x1a.google.protobuf.TimestampR\aupdated\x12;\n" +
+	"\vrun_started\x18\r \x01(\v2\x1a.google.protobuf.TimestampR\n" +
+	"runStarted\x12\x19\n" +
+	"\bactor_id\x18\x0e \x01(\x03R\aactorId\x12\x10\n" +
+	"\x03url\x18\x0f \x01(\tR\x03url\x120\n" +
+	"\x14pull_request_numbers\x18\x10 \x03(\x03R\x12pullRequestNumbers\"\xe0\x02\n" +
+	"\x11GithubWorkflowJob\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\x03R\x02id\x12\x15\n" +
+	"\x06run_id\x18\x02 \x01(\x03R\x05runId\x12\x12\n" +
+	"\x04name\x18\x03 \x01(\tR\x04name\x12\x16\n" +
+	"\x06status\x18\x04 \x01(\tR\x06status\x12\x1e\n" +
+	"\n" +
+	"conclusion\x18\x05 \x01(\tR\n" +
+	"conclusion\x124\n" +
+	"\astarted\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\astarted\x128\n" +
+	"\tcompleted\x18\a \x01(\v2\x1a.google.protobuf.TimestampR\tcompleted\x12\x1f\n" +
+	"\vrunner_name\x18\b \x01(\tR\n" +
+	"runnerName\x12\x16\n" +
+	"\x06labels\x18\t \x03(\tR\x06labels\x12/\n" +
+	"\x04step\x18\n" +
+	" \x03(\v2\x1b.maintpb.GithubWorkflowStepR\x04step\"\xe8\x01\n" +
+	"\x12GithubWorkflowStep\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x16\n" +
+	"\x06status\x18\x02 \x01(\tR\x06status\x12\x1e\n" +
+	"\n" +
+	"conclusion\x18\x03 \x01(\tR\n" +
+	"conclusion\x12\x16\n" +
+	"\x06number\x18\x04 \x01(\x03R\x06number\x124\n" +
+	"\astarted\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\astarted\x128\n" +
+	"\tcompleted\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\tcompletedB%Z#golang.org/x/build/maintner/maintpbb\x06proto3"
 
 var (
 	file_maintner_proto_rawDescOnce sync.Once
@@ -2257,7 +2753,7 @@ func file_maintner_proto_rawDescGZIP() []byte {
 	return file_maintner_proto_rawDescData
 }
 
-var file_maintner_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
+var file_maintner_proto_msgTypes = make([]protoimpl.MessageInfo, 29)
 var file_maintner_proto_goTypes = []any{
 	(*Mutation)(nil),                   // 0: maintpb.Mutation
 	(*GithubMutation)(nil),             // 1: maintpb.GithubMutation
@@ -2284,67 +2780,82 @@ var file_maintner_proto_goTypes = []any{
 	(*GitTag)(nil),                     // 22: maintpb.GitTag
 	(*GerritMutation)(nil),             // 23: maintpb.GerritMutation
 	(*GitRef)(nil),                     // 24: maintpb.GitRef
-	(*timestamppb.Timestamp)(nil),      // 25: google.protobuf.Timestamp
+	(*GithubActionsMutation)(nil),      // 25: maintpb.GithubActionsMutation
+	(*GithubWorkflowRun)(nil),          // 26: maintpb.GithubWorkflowRun
+	(*GithubWorkflowJob)(nil),          // 27: maintpb.GithubWorkflowJob
+	(*GithubWorkflowStep)(nil),         // 28: maintpb.GithubWorkflowStep
+	(*timestamppb.Timestamp)(nil),      // 29: google.protobuf.Timestamp
 }
 var file_maintner_proto_depIdxs = []int32{
 	2,  // 0: maintpb.Mutation.github_issue:type_name -> maintpb.GithubIssueMutation
 	1,  // 1: maintpb.Mutation.github:type_name -> maintpb.GithubMutation
-	17, // 2: maintpb.Mutation.git:type_name -> maintpb.GitMutation
-	23, // 3: maintpb.Mutation.gerrit:type_name -> maintpb.GerritMutation
-	5,  // 4: maintpb.GithubMutation.labels:type_name -> maintpb.GithubLabel
-	6,  // 5: maintpb.GithubMutation.milestones:type_name -> maintpb.GithubMilestone
-	13, // 6: maintpb.GithubIssueMutation.user:type_name -> maintpb.GithubUser
-	13, // 7: maintpb.GithubIssueMutation.assignees:type_name -> maintpb.GithubUser
-	25, // 8: maintpb.GithubIssueMutation.created:type_name -> google.protobuf.Timestamp
-	25, // 9: maintpb.GithubIssueMutation.updated:type_name -> google.protobuf.Timestamp
-	4,  // 10: maintpb.GithubIssueMutation.body_change:type_name -> maintpb.StringChange
-	3,  // 11: maintpb.GithubIssueMutation.closed:type_name -> maintpb.BoolChange
-	3,  // 12: maintpb.GithubIssueMutation.locked:type_name -> maintpb.BoolChange
-	25, // 13: maintpb.GithubIssueMutation.closed_at:type_name -> google.protobuf.Timestamp
-	13, // 14: maintpb.GithubIssueMutation.closed_by:type_name -> maintpb.GithubUser
-	5,  // 15: maintpb.GithubIssueMutation.add_label:type_name -> maintpb.GithubLabel
-	12, // 16: maintpb.GithubIssueMutation.comment:type_name -> maintpb.GithubIssueCommentMutation
-	11, // 17: maintpb.GithubIssueMutation.comment_status:type_name -> maintpb.GithubIssueSyncStatus
-	7,  // 18: maintpb.GithubIssueMutation.event:type_name -> maintpb.GithubIssueEvent
-	11, // 19: maintpb.GithubIssueMutation.event_status:type_name -> maintpb.GithubIssueSyncStatus
-	10, // 20: maintpb.GithubIssueMutation.review:type_name -> maintpb.GithubReview
-	11, // 21: maintpb.GithubIssueMutation.review_status:type_name -> maintpb.GithubIssueSyncStatus
-	14, // 22: maintpb.GithubIssueMutation.reaction:type_name -> maintpb.GithubReaction
-	11, // 23: maintpb.GithubIssueMutation.reaction_status:type_name -> maintpb.GithubIssueSyncStatus
-	3,  // 24: maintpb.GithubIssueMutation.draft:type_name -> maintpb.BoolChange
-	3,  // 25: maintpb.GithubIssueMutation.merged:type_name -> maintpb.BoolChange
-	25, // 26: maintpb.GithubIssueMutation.merged_at:type_name -> google.protobuf.Timestamp
-	13, // 27: maintpb.GithubIssueMutation.merged_by:type_name -> maintpb.GithubUser
-	16, // 28: maintpb.GithubIssueMutation.head:type_name -> maintpb.GithubPullRequestBranch
-	16, // 29: maintpb.GithubIssueMutation.base:type_name -> maintpb.GithubPullRequestBranch
-	11, // 30: maintpb.GithubIssueMutation.pr_detail_status:type_name -> maintpb.GithubIssueSyncStatus
-	3,  // 31: maintpb.GithubMilestone.closed:type_name -> maintpb.BoolChange
-	25, // 32: maintpb.GithubIssueEvent.created:type_name -> google.protobuf.Timestamp
-	5,  // 33: maintpb.GithubIssueEvent.label:type_name -> maintpb.GithubLabel
-	6,  // 34: maintpb.GithubIssueEvent.milestone:type_name -> maintpb.GithubMilestone
-	9,  // 35: maintpb.GithubIssueEvent.commit:type_name -> maintpb.GithubCommit
-	15, // 36: maintpb.GithubIssueEvent.team_reviewer:type_name -> maintpb.GithubTeam
-	8,  // 37: maintpb.GithubIssueEvent.dismissed_review:type_name -> maintpb.GithubDismissedReviewEvent
-	25, // 38: maintpb.GithubReview.created:type_name -> google.protobuf.Timestamp
-	25, // 39: maintpb.GithubIssueSyncStatus.server_date:type_name -> google.protobuf.Timestamp
-	13, // 40: maintpb.GithubIssueCommentMutation.user:type_name -> maintpb.GithubUser
-	25, // 41: maintpb.GithubIssueCommentMutation.created:type_name -> google.protobuf.Timestamp
-	25, // 42: maintpb.GithubIssueCommentMutation.updated:type_name -> google.protobuf.Timestamp
-	14, // 43: maintpb.GithubIssueCommentMutation.reaction:type_name -> maintpb.GithubReaction
-	25, // 44: maintpb.GithubReaction.created:type_name -> google.protobuf.Timestamp
-	18, // 45: maintpb.GitMutation.repo:type_name -> maintpb.GitRepo
-	19, // 46: maintpb.GitMutation.commit:type_name -> maintpb.GitCommit
-	24, // 47: maintpb.GitMutation.ref_update:type_name -> maintpb.GitRef
-	22, // 48: maintpb.GitMutation.tag:type_name -> maintpb.GitTag
-	20, // 49: maintpb.GitCommit.diff_tree:type_name -> maintpb.GitDiffTree
-	21, // 50: maintpb.GitDiffTree.file:type_name -> maintpb.GitDiffTreeFile
-	19, // 51: maintpb.GerritMutation.commits:type_name -> maintpb.GitCommit
-	24, // 52: maintpb.GerritMutation.refs:type_name -> maintpb.GitRef
-	53, // [53:53] is the sub-list for method output_type
-	53, // [53:53] is the sub-list for method input_type
-	53, // [53:53] is the sub-list for extension type_name
-	53, // [53:53] is the sub-list for extension extendee
-	0,  // [0:53] is the sub-list for field type_name
+	25, // 2: maintpb.Mutation.github_actions:type_name -> maintpb.GithubActionsMutation
+	17, // 3: maintpb.Mutation.git:type_name -> maintpb.GitMutation
+	23, // 4: maintpb.Mutation.gerrit:type_name -> maintpb.GerritMutation
+	5,  // 5: maintpb.GithubMutation.labels:type_name -> maintpb.GithubLabel
+	6,  // 6: maintpb.GithubMutation.milestones:type_name -> maintpb.GithubMilestone
+	13, // 7: maintpb.GithubIssueMutation.user:type_name -> maintpb.GithubUser
+	13, // 8: maintpb.GithubIssueMutation.assignees:type_name -> maintpb.GithubUser
+	29, // 9: maintpb.GithubIssueMutation.created:type_name -> google.protobuf.Timestamp
+	29, // 10: maintpb.GithubIssueMutation.updated:type_name -> google.protobuf.Timestamp
+	4,  // 11: maintpb.GithubIssueMutation.body_change:type_name -> maintpb.StringChange
+	3,  // 12: maintpb.GithubIssueMutation.closed:type_name -> maintpb.BoolChange
+	3,  // 13: maintpb.GithubIssueMutation.locked:type_name -> maintpb.BoolChange
+	29, // 14: maintpb.GithubIssueMutation.closed_at:type_name -> google.protobuf.Timestamp
+	13, // 15: maintpb.GithubIssueMutation.closed_by:type_name -> maintpb.GithubUser
+	5,  // 16: maintpb.GithubIssueMutation.add_label:type_name -> maintpb.GithubLabel
+	12, // 17: maintpb.GithubIssueMutation.comment:type_name -> maintpb.GithubIssueCommentMutation
+	11, // 18: maintpb.GithubIssueMutation.comment_status:type_name -> maintpb.GithubIssueSyncStatus
+	7,  // 19: maintpb.GithubIssueMutation.event:type_name -> maintpb.GithubIssueEvent
+	11, // 20: maintpb.GithubIssueMutation.event_status:type_name -> maintpb.GithubIssueSyncStatus
+	10, // 21: maintpb.GithubIssueMutation.review:type_name -> maintpb.GithubReview
+	11, // 22: maintpb.GithubIssueMutation.review_status:type_name -> maintpb.GithubIssueSyncStatus
+	14, // 23: maintpb.GithubIssueMutation.reaction:type_name -> maintpb.GithubReaction
+	11, // 24: maintpb.GithubIssueMutation.reaction_status:type_name -> maintpb.GithubIssueSyncStatus
+	3,  // 25: maintpb.GithubIssueMutation.draft:type_name -> maintpb.BoolChange
+	3,  // 26: maintpb.GithubIssueMutation.merged:type_name -> maintpb.BoolChange
+	29, // 27: maintpb.GithubIssueMutation.merged_at:type_name -> google.protobuf.Timestamp
+	13, // 28: maintpb.GithubIssueMutation.merged_by:type_name -> maintpb.GithubUser
+	16, // 29: maintpb.GithubIssueMutation.head:type_name -> maintpb.GithubPullRequestBranch
+	16, // 30: maintpb.GithubIssueMutation.base:type_name -> maintpb.GithubPullRequestBranch
+	11, // 31: maintpb.GithubIssueMutation.pr_detail_status:type_name -> maintpb.GithubIssueSyncStatus
+	3,  // 32: maintpb.GithubMilestone.closed:type_name -> maintpb.BoolChange
+	29, // 33: maintpb.GithubIssueEvent.created:type_name -> google.protobuf.Timestamp
+	5,  // 34: maintpb.GithubIssueEvent.label:type_name -> maintpb.GithubLabel
+	6,  // 35: maintpb.GithubIssueEvent.milestone:type_name -> maintpb.GithubMilestone
+	9,  // 36: maintpb.GithubIssueEvent.commit:type_name -> maintpb.GithubCommit
+	15, // 37: maintpb.GithubIssueEvent.team_reviewer:type_name -> maintpb.GithubTeam
+	8,  // 38: maintpb.GithubIssueEvent.dismissed_review:type_name -> maintpb.GithubDismissedReviewEvent
+	29, // 39: maintpb.GithubReview.created:type_name -> google.protobuf.Timestamp
+	29, // 40: maintpb.GithubIssueSyncStatus.server_date:type_name -> google.protobuf.Timestamp
+	13, // 41: maintpb.GithubIssueCommentMutation.user:type_name -> maintpb.GithubUser
+	29, // 42: maintpb.GithubIssueCommentMutation.created:type_name -> google.protobuf.Timestamp
+	29, // 43: maintpb.GithubIssueCommentMutation.updated:type_name -> google.protobuf.Timestamp
+	14, // 44: maintpb.GithubIssueCommentMutation.reaction:type_name -> maintpb.GithubReaction
+	29, // 45: maintpb.GithubReaction.created:type_name -> google.protobuf.Timestamp
+	18, // 46: maintpb.GitMutation.repo:type_name -> maintpb.GitRepo
+	19, // 47: maintpb.GitMutation.commit:type_name -> maintpb.GitCommit
+	24, // 48: maintpb.GitMutation.ref_update:type_name -> maintpb.GitRef
+	22, // 49: maintpb.GitMutation.tag:type_name -> maintpb.GitTag
+	20, // 50: maintpb.GitCommit.diff_tree:type_name -> maintpb.GitDiffTree
+	21, // 51: maintpb.GitDiffTree.file:type_name -> maintpb.GitDiffTreeFile
+	19, // 52: maintpb.GerritMutation.commits:type_name -> maintpb.GitCommit
+	24, // 53: maintpb.GerritMutation.refs:type_name -> maintpb.GitRef
+	26, // 54: maintpb.GithubActionsMutation.run:type_name -> maintpb.GithubWorkflowRun
+	27, // 55: maintpb.GithubActionsMutation.job:type_name -> maintpb.GithubWorkflowJob
+	29, // 56: maintpb.GithubWorkflowRun.created:type_name -> google.protobuf.Timestamp
+	29, // 57: maintpb.GithubWorkflowRun.updated:type_name -> google.protobuf.Timestamp
+	29, // 58: maintpb.GithubWorkflowRun.run_started:type_name -> google.protobuf.Timestamp
+	29, // 59: maintpb.GithubWorkflowJob.started:type_name -> google.protobuf.Timestamp
+	29, // 60: maintpb.GithubWorkflowJob.completed:type_name -> google.protobuf.Timestamp
+	28, // 61: maintpb.GithubWorkflowJob.step:type_name -> maintpb.GithubWorkflowStep
+	29, // 62: maintpb.GithubWorkflowStep.started:type_name -> google.protobuf.Timestamp
+	29, // 63: maintpb.GithubWorkflowStep.completed:type_name -> google.protobuf.Timestamp
+	64, // [64:64] is the sub-list for method output_type
+	64, // [64:64] is the sub-list for method input_type
+	64, // [64:64] is the sub-list for extension type_name
+	64, // [64:64] is the sub-list for extension extendee
+	0,  // [0:64] is the sub-list for field type_name
 }
 
 func init() { file_maintner_proto_init() }
@@ -2358,7 +2869,7 @@ func file_maintner_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_maintner_proto_rawDesc), len(file_maintner_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   25,
+			NumMessages:   29,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

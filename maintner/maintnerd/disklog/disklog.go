@@ -7,6 +7,7 @@
 package disklog
 
 import (
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -507,5 +508,25 @@ func (dl *DiskLog) serveLogFile(w http.ResponseWriter, r *http.Request, prefix, 
 	defer f.Close()
 
 	w.Header().Set("Content-Type", "application/octet-stream")
-	http.ServeContent(w, r, "", time.Time{}, io.NewSectionReader(f, 0, size))
+
+	// For Range requests (partial downloads), use ServeContent which
+	// handles Range/Content-Range headers. Gzip is incompatible with
+	// Range since the byte offsets refer to uncompressed data.
+	if r.Header.Get("Range") != "" {
+		http.ServeContent(w, r, "", time.Time{}, io.NewSectionReader(f, 0, size))
+		return
+	}
+
+	// For full downloads, gzip if the client accepts it.
+	if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+		http.ServeContent(w, r, "", time.Time{}, io.NewSectionReader(f, 0, size))
+		return
+	}
+	w.Header().Set("Content-Encoding", "gzip")
+	w.WriteHeader(http.StatusOK)
+	gz := gzip.NewWriter(w)
+	if _, err := io.CopyN(gz, f, size); err != nil {
+		panic(http.ErrAbortHandler)
+	}
+	gz.Close()
 }

@@ -17,11 +17,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/go-cmp/cmp"
 	"github.com/bradfitz/gxbm/gerrit"
 	"github.com/bradfitz/gxbm/maintner"
 	"github.com/bradfitz/gxbm/maintner/godata"
 	"github.com/bradfitz/gxbm/maintner/maintnerd/apipb"
+	"github.com/google/go-cmp/cmp"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/encoding/prototext"

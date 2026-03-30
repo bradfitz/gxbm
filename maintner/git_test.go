@@ -170,7 +170,6 @@ func run(t testing.TB, dir string, name string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-
 // mutationCollector is a MutationLogger that collects mutations in memory.
 type mutationCollector struct {
 	mutations []*maintpb.Mutation

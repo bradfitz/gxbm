@@ -62,8 +62,8 @@ type Corpus struct {
 	gitRefs               map[string]map[string]GitHash // repo name -> ref name -> hash
 	gitTags               map[GitHash]*GitTag           // tag object hash -> parsed tag
 	gitCommitTodo         map[GitHash]bool              // -> true
-	gitOfHg               map[string]GitHash        // hg hex hash -> git hash
-	zoneCache             map[string]*time.Location // "+0530" => location
+	gitOfHg               map[string]GitHash            // hg hex hash -> git hash
+	zoneCache             map[string]*time.Location     // "+0530" => location
 }
 
 // RLock grabs the corpus's read lock. Grabbing the read lock prevents
@@ -327,6 +327,11 @@ var ErrSplit = errors.New("maintner: leader server's history split, process out 
 // Update must not be called concurrently with any other Update calls. If
 // reading the corpus concurrently while the corpus is updating, you must hold
 // the read lock using Corpus.RLock.
+//
+// Deprecated: Update holds the corpus write lock for the entire duration,
+// including while blocking on the network for new data. Use
+// [Corpus.RunUpdateLoop] instead, which only holds the lock while processing
+// mutations.
 func (c *Corpus) Update(ctx context.Context) error {
 	if c.mutationSource == nil {
 		panic("Update called without call to Initialize")
@@ -344,6 +349,8 @@ func (c *Corpus) Update(ctx context.Context) error {
 
 // UpdateWithLocker behaves just like Update, but holds lk when processing
 // mutation events.
+//
+// Deprecated: Use [Corpus.RunUpdateLoop] instead.
 func (c *Corpus) UpdateWithLocker(ctx context.Context, lk sync.Locker) error {
 	if c.mutationSource == nil {
 		panic("UpdateWithLocker called without call to Initialize")
@@ -357,6 +364,59 @@ func (c *Corpus) UpdateWithLocker(ctx context.Context, lk sync.Locker) error {
 		c.sawErrSplit = true
 	}
 	return err
+}
+
+// RunUpdateLoop continuously polls the MutationSource for new mutations and
+// applies them to the corpus. Unlike [Corpus.Update], it does not hold the
+// corpus write lock while waiting for data. Instead, it only briefly locks the corpus
+// while processing each mutation. This allows concurrent readers holding
+// [Corpus.RLock] to proceed unblocked while the loop waits for new data.
+//
+// RunUpdateLoop runs until ctx is canceled or a fatal error (such as
+// [ErrSplit]) occurs. It is intended to be run in a goroutine for the
+// lifetime of the process.
+//
+// RunUpdateLoop must not be called concurrently with itself or with Update.
+func (c *Corpus) RunUpdateLoop(ctx context.Context) error {
+	if c.mutationSource == nil {
+		panic("RunUpdateLoop called without call to Initialize")
+	}
+	if c.sawErrSplit {
+		panic("RunUpdateLoop called after previous call returned ErrSplit")
+	}
+	src := c.mutationSource
+	done := ctx.Done()
+	for {
+		ch := src.GetMutations(ctx)
+		for {
+			// Wait for an event WITHOUT holding any lock.
+			var e MutationStreamEvent
+			select {
+			case <-done:
+				return ctx.Err()
+			case e = <-ch:
+			}
+
+			if e.Err != nil {
+				log.Printf("Corpus GetMutations: %v", e.Err)
+				if e.Err == ErrSplit {
+					c.sawErrSplit = true
+				}
+				return e.Err
+			}
+
+			// Lock only while mutating the corpus.
+			c.mu.Lock()
+			if e.End {
+				c.didInit = true
+				c.finishProcessing()
+				c.mu.Unlock()
+				break // inner loop; long-poll for next batch
+			}
+			c.processMutationLocked(e.Mutation)
+			c.mu.Unlock()
+		}
+	}
 }
 
 type noopLocker struct{}

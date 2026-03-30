@@ -693,14 +693,14 @@ type GitHubComment struct {
 type GitHubReaction struct {
 	ID      int64
 	User    *GitHubUser
-	Content string    // "+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"
+	Content string // "+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"
 	Created time.Time
 }
 
 // GitHubWorkflowRun represents a GitHub Actions workflow run.
 type GitHubWorkflowRun struct {
 	ID         int64
-	Name       string  // workflow name
+	Name       string // workflow name
 	HeadBranch string
 	HeadSHA    GitHash
 	Event      string // "push", "pull_request", etc.
@@ -3053,15 +3053,17 @@ func (p *githubRepoPoller) graphqlRequest(ctx context.Context, query string, var
 	return json.Unmarshal(gqlResp.Data, result)
 }
 
+// reactionCountScanQuery uses conservative page sizes (25 issues, 50
+// comments) to stay within GitHub's GraphQL resource limits on large repos.
 const reactionCountScanQuery = `
 query($owner: String!, $name: String!, $cursor: String) {
   repository(owner: $owner, name: $name) {
-    issues(first: 100, after: $cursor, orderBy: {field: CREATED_AT, direction: ASC}) {
+    issues(first: 25, after: $cursor, orderBy: {field: CREATED_AT, direction: ASC}) {
       pageInfo { hasNextPage endCursor }
       nodes {
         number
         reactions { totalCount }
-        comments(first: 100) {
+        comments(first: 50) {
           pageInfo { hasNextPage endCursor }
           nodes {
             databaseId
@@ -3560,9 +3562,9 @@ func parseGithubEvents(r io.Reader) ([]*GitHubIssueEvent, error) {
 				e.TeamReviewer = t
 			}
 		}
-		delete(em, "node_id")                    // GitHub API v4 Global Node ID; don't store it.
-		delete(em, "lock_reason")                // Not stored.
-		delete(em, "performed_via_github_app")   // Not stored; e.g. Copilot PR reviewer.
+		delete(em, "node_id")                  // GitHub API v4 Global Node ID; don't store it.
+		delete(em, "lock_reason")              // Not stored.
+		delete(em, "performed_via_github_app") // Not stored; e.g. Copilot PR reviewer.
 
 		otherJSON, _ := json.Marshal(em)
 		e.OtherJSON = string(otherJSON)

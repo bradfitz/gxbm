@@ -566,7 +566,7 @@ func (ns *netMutSource) syncSeg(ctx context.Context, seg LogSegmentJSON) (_ file
 		return fn(ctx, seg)
 	}
 
-	isFinalSeg := !strings.HasPrefix(seg.URL, "https://storage.googleapis.com/")
+	isFinalSeg := !seg.Frozen && !strings.HasPrefix(seg.URL, "https://storage.googleapis.com/")
 	relURL, err := url.Parse(seg.URL)
 	if err != nil {
 		return fileSeg{}, nil, err
@@ -681,6 +681,7 @@ type LogSegmentJSON struct {
 	Size   int64  `json:"size"`
 	SHA224 string `json:"sha224"`
 	URL    string `json:"url"`
+	Frozen bool   `json:"frozen,omitempty"` // true for immutable segments that will never change
 }
 
 // fetchError records an error during a fetch operation over an unreliable network.

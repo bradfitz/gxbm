@@ -672,7 +672,7 @@ func (r *GitHubRepo) newGithubReview(p *maintpb.GithubReview) *GitHubReview {
 		// TODO: parse it and see if we've since learned how
 		// to deal with it?
 		if r.verbose() {
-			log.Printf("newGithubReview: unknown JSON in log: %s", p.OtherJson)
+			r.github.c.logf("newGithubReview: unknown JSON in log: %s", p.OtherJson)
 		}
 		e.OtherJSON = string(p.OtherJson)
 	}
@@ -878,7 +878,7 @@ func (r *GitHubRepo) newGithubEvent(p *maintpb.GithubIssueEvent) *GitHubIssueEve
 		// TODO: parse it and see if we've since learned how
 		// to deal with it?
 		if r.verbose() {
-			log.Printf("newGithubEvent: unknown JSON in log: %s", p.OtherJson)
+			r.github.c.logf("newGithubEvent: unknown JSON in log: %s", p.OtherJson)
 		}
 		e.OtherJSON = string(p.OtherJson)
 	}
@@ -1478,7 +1478,7 @@ func (c *Corpus) processGithubMutation(m *maintpb.GithubMutation) {
 	c.initGithub()
 	gr := c.github.getOrCreateRepo(m.Owner, m.Repo)
 	if gr == nil {
-		log.Printf("bogus Owner/Repo %q/%q in mutation: %v", m.Owner, m.Repo, m)
+		c.logf("bogus Owner/Repo %q/%q in mutation: %v", m.Owner, m.Repo, m)
 		return
 	}
 	for _, lp := range m.Labels {
@@ -1499,11 +1499,11 @@ func (c *Corpus) processGithubIssueMutation(m *maintpb.GithubIssueMutation) {
 	c.initGithub()
 	gr := c.github.getOrCreateRepo(m.Owner, m.Repo)
 	if gr == nil {
-		log.Printf("bogus Owner/Repo %q/%q in mutation: %v", m.Owner, m.Repo, m)
+		c.logf("bogus Owner/Repo %q/%q in mutation: %v", m.Owner, m.Repo, m)
 		return
 	}
 	if m.Number == 0 {
-		log.Printf("bogus zero Number in mutation: %v", m)
+		c.logf("bogus zero Number in mutation: %v", m)
 		return
 	}
 	gi, ok := gr.issues[m.Number]
@@ -1633,7 +1633,7 @@ func (c *Corpus) processGithubIssueMutation(m *maintpb.GithubIssueMutation) {
 
 	for _, cmut := range m.Comment {
 		if cmut.Id == 0 {
-			log.Printf("Ignoring bogus comment mutation lacking Id: %v", cmut)
+			c.logf("Ignoring bogus comment mutation lacking Id: %v", cmut)
 			continue
 		}
 		gc, ok := gi.comments[cmut.Id]
@@ -1675,7 +1675,7 @@ func (c *Corpus) processGithubIssueMutation(m *maintpb.GithubIssueMutation) {
 
 	for _, emut := range m.Event {
 		if emut.Id == 0 {
-			log.Printf("Ignoring bogus event mutation lacking Id: %v", emut)
+			c.logf("Ignoring bogus event mutation lacking Id: %v", emut)
 			continue
 		}
 		if gi.events == nil {
@@ -1693,7 +1693,7 @@ func (c *Corpus) processGithubIssueMutation(m *maintpb.GithubIssueMutation) {
 
 	for _, rmut := range m.Review {
 		if rmut.Id == 0 {
-			log.Printf("Ignoring bogus review mutation lacking Id: %v", rmut)
+			c.logf("Ignoring bogus review mutation lacking Id: %v", rmut)
 			continue
 		}
 		if gi.reviews == nil {
@@ -1877,7 +1877,7 @@ func (p *githubRepoPoller) Owner() string { return p.gr.id.Owner }
 func (p *githubRepoPoller) Repo() string  { return p.gr.id.Repo }
 
 func (p *githubRepoPoller) logf(format string, args ...any) {
-	log.Printf("sync github "+p.gr.id.String()+": "+format, args...)
+	p.c.logf("sync github "+p.gr.id.String()+": "+format, args...)
 }
 
 func (p *githubRepoPoller) sync(ctx context.Context, expectChanges bool) error {
@@ -2091,7 +2091,7 @@ func (c *Corpus) processGithubActionsMutation(m *maintpb.GithubActionsMutation) 
 	c.initGithub()
 	gr := c.github.getOrCreateRepo(m.Owner, m.Repo)
 	if gr == nil {
-		log.Printf("bogus Owner/Repo %q/%q in actions mutation", m.Owner, m.Repo)
+		c.logf("bogus Owner/Repo %q/%q in actions mutation", m.Owner, m.Repo)
 		return
 	}
 
@@ -2306,7 +2306,7 @@ func (p *githubRepoPoller) syncWorkflowRuns(ctx context.Context) error {
 // retryGitHubAPI retries fn on transient errors (5xx, network) with
 // exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s.
 // Returns the last error if all retries fail.
-func retryGitHubAPI[T any](ctx context.Context, desc string, fn func() (T, *github.Response, error)) (T, *github.Response, error) {
+func retryGitHubAPI[T any](ctx context.Context, logf func(string, ...any), desc string, fn func() (T, *github.Response, error)) (T, *github.Response, error) {
 	const maxAttempts = 7 // 1 initial + 6 retries (up to 32s backoff)
 	var zero T
 	for attempt := range maxAttempts {
@@ -2323,7 +2323,7 @@ func retryGitHubAPI[T any](ctx context.Context, desc string, fn func() (T, *gith
 		}
 		if attempt < maxAttempts-1 {
 			delay := time.Duration(1<<attempt) * time.Second // 1s, 2s, 4s, 8s, 16s, 32s
-			log.Printf("%s: transient error (attempt %d/%d): %v; retrying in %v", desc, attempt+1, maxAttempts, err, delay)
+			logf("%s: transient error (attempt %d/%d): %v; retrying in %v", desc, attempt+1, maxAttempts, err, delay)
 			select {
 			case <-time.After(delay):
 			case <-ctx.Done():
@@ -2424,7 +2424,7 @@ func (p *githubRepoPoller) syncWorkflowRunsBackfillGaps(ctx context.Context) err
 func (p *githubRepoPoller) backfillGap(ctx context.Context, start, end time.Time) (int, error) {
 	// Probe: single API call to check if there's anything in this range.
 	created := start.Format("2006-01-02T15:04:05Z") + ".." + end.Format("2006-01-02T15:04:05Z")
-	probe, _, err := retryGitHubAPI(ctx, "probing gap", func() (*github.WorkflowRuns, *github.Response, error) {
+	probe, _, err := retryGitHubAPI(ctx, p.logf, "probing gap", func() (*github.WorkflowRuns, *github.Response, error) {
 		return p.githubDirect.Actions.ListRepositoryWorkflowRuns(ctx, p.Owner(), p.Repo(), &github.ListWorkflowRunsOptions{
 			Created:     created,
 			ListOptions: github.ListOptions{PerPage: 1},
@@ -2473,7 +2473,7 @@ func (p *githubRepoPoller) syncWorkflowRunsWindow(ctx context.Context, start, en
 	}
 
 	for {
-		runs, runsResp, err := retryGitHubAPI(ctx, "listing workflow runs", func() (*github.WorkflowRuns, *github.Response, error) {
+		runs, runsResp, err := retryGitHubAPI(ctx, p.logf, "listing workflow runs", func() (*github.WorkflowRuns, *github.Response, error) {
 			return p.githubDirect.Actions.ListRepositoryWorkflowRuns(ctx, p.Owner(), p.Repo(), opts)
 		})
 		if err != nil {
@@ -2528,7 +2528,7 @@ func (p *githubRepoPoller) syncWorkflowJobs(ctx context.Context, runID int64) er
 		ListOptions: github.ListOptions{PerPage: 100},
 	}
 	for {
-		jobs, jobsResp, err := retryGitHubAPI(ctx, fmt.Sprintf("listing jobs for run %d", runID), func() (*github.Jobs, *github.Response, error) {
+		jobs, jobsResp, err := retryGitHubAPI(ctx, p.logf, fmt.Sprintf("listing jobs for run %d", runID), func() (*github.Jobs, *github.Response, error) {
 			return p.githubDirect.Actions.ListWorkflowJobs(ctx, p.Owner(), p.Repo(), runID, opts)
 		})
 		if err != nil {
@@ -2740,7 +2740,7 @@ func (p *githubRepoPoller) foreachItem(
 		}
 		fromCache := page == 1 && res.Response.Header.Get(xFromCache) == "1"
 		if fromCache {
-			log.Printf("no new items of type %T", items[0])
+			p.logf("no new items of type %T", items[0])
 			// No need to walk over these again.
 			return nil
 		}

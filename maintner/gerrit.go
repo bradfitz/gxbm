@@ -15,7 +15,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net/url"
 	"os"
 	"os/exec"
@@ -244,7 +243,7 @@ func (gp *GerritProject) GitCommit(hash string) (*GitCommit, error) {
 }
 
 func (gp *GerritProject) logf(format string, args ...any) {
-	log.Printf("gerrit "+gp.proj+": "+format, args...)
+	gp.gerrit.c.logf("gerrit "+gp.proj+": "+format, args...)
 }
 
 // gerritCLVersion is a value type used as a map key to store a CL
@@ -853,8 +852,8 @@ func (gp *GerritProject) finishProcessingCL(cl *GerritCL) {
 
 	mostRecentMetaCommit, ok := c.gitCommit[cl.Meta.Commit.Hash]
 	if !ok {
-		log.Printf("WARNING: GerritProject(%q).finishProcessingCL failed to find CL %v hash %s",
-			gp.ServerSlashProject(), cl.Number, cl.Meta.Commit.Hash)
+		gp.logf("WARNING: finishProcessingCL failed to find CL %v hash %s",
+			cl.Number, cl.Meta.Commit.Hash)
 		return
 	}
 
@@ -886,8 +885,8 @@ func (gp *GerritProject) finishProcessingCL(cl *GerritCL) {
 		return nil
 	})
 	if err != nil {
-		log.Printf("WARNING: GerritProject(%q).finishProcessingCL failed to walk CL %v meta history: %v",
-			gp.ServerSlashProject(), cl.Number, err)
+		gp.logf("WARNING: finishProcessingCL failed to walk CL %v meta history: %v",
+			cl.Number, err)
 		return
 	}
 
@@ -1276,7 +1275,7 @@ func (gp *GerritProject) init(ctx context.Context) error {
 	cmd.Stderr = buf
 	envutil.SetDir(cmd, gitDir)
 	if err := cmd.Run(); err != nil {
-		log.Printf(`Error running "git init": %s`, buf.String())
+		gp.logf(`Error running "git init": %s`, buf.String())
 		return err
 	}
 	buf.Reset()
@@ -1285,7 +1284,7 @@ func (gp *GerritProject) init(ctx context.Context) error {
 	cmd.Stderr = buf
 	envutil.SetDir(cmd, gitDir)
 	if err := cmd.Run(); err != nil {
-		log.Printf(`Error running "git remote add origin": %s`, buf.String())
+		gp.logf(`Error running "git remote add origin": %s`, buf.String())
 		return err
 	}
 

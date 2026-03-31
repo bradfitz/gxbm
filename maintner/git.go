@@ -240,14 +240,14 @@ func (c *Corpus) syncGitCommits(ctx context.Context, conf polledGitCommits, loop
 				return nil
 			}
 			if !idle {
-				log.Printf("All git commits index for %v; idle.", conf.repo)
+				c.logf("All git commits index for %v; idle.", conf.repo)
 				idle = true
 			}
 			time.Sleep(5 * time.Second)
 			continue
 		}
 		if err := c.indexCommit(conf, hash); err != nil {
-			log.Printf("Error indexing %v: %v", hash, err)
+			c.logf("Error indexing %v: %v", hash, err)
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -451,7 +451,7 @@ func (c *Corpus) processGitMutation(m *maintpb.GitMutation) {
 // c.mu is held for writing.
 func (c *Corpus) processGitTag(tag *maintpb.GitTag) *GitTag {
 	if !ValidHexHashLen(tag.Hash) || !ValidHexHashLen(tag.TargetHash) {
-		log.Printf("bogus git tag hash %q / target %q", tag.Hash, tag.TargetHash)
+		c.logf("bogus git tag hash %q / target %q", tag.Hash, tag.TargetHash)
 		return &GitTag{}
 	}
 	hash := c.gitHashFromHexStr(tag.Hash)
@@ -592,7 +592,7 @@ func (c *Corpus) processGitCommit(commit *maintpb.GitCommit) (*GitCommit, error)
 		return nil
 	})
 	if err != nil {
-		log.Printf("Unparseable commit %q: %v", hash, err)
+		c.logf("Unparseable commit %q: %v", hash, err)
 		return nil, fmt.Errorf("Unparseable commit %q: %v", hash, err)
 	}
 	if ph, ok := c.gitCommit[hash]; ok {
@@ -608,7 +608,7 @@ func (c *Corpus) processGitCommit(commit *maintpb.GitCommit) (*GitCommit, error)
 		now := time.Now()
 		if now.After(c.lastGitCount.Add(time.Second)) {
 			c.lastGitCount = now
-			log.Printf("Num git commits = %v", len(c.gitCommit))
+			c.logf("Num git commits = %v", len(c.gitCommit))
 		}
 	}
 	return gc, nil
@@ -713,7 +713,7 @@ func (c *Corpus) syncGitRepo(ctx context.Context, ws *watchedGitRepoState, loop 
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("git init --bare %s: %v\n%s", dir, err, out)
 		}
-		log.Printf("Created bare scratch repo at %s", dir)
+		c.logf("Created bare scratch repo at %s", dir)
 	}
 
 	for {
@@ -845,11 +845,11 @@ func (c *Corpus) syncGitRepoOnce(ctx context.Context, ws *watchedGitRepoState, d
 		}
 		indexed++
 		if indexed%1000 == 0 {
-			log.Printf("Indexed %d git commits so far for %s ...", indexed, ws.conf.Name)
+			c.logf("Indexed %d git commits so far for %s ...", indexed, ws.conf.Name)
 		}
 	}
 	if indexed > 0 {
-		log.Printf("Indexed %d new git commits for %s", indexed, ws.conf.Name)
+		c.logf("Indexed %d new git commits for %s", indexed, ws.conf.Name)
 	}
 
 	// 8. Emit ref update mutations (after commits are indexed).

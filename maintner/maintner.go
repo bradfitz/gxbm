@@ -28,6 +28,10 @@ import (
 
 // Corpus holds all of a project's metadata.
 type Corpus struct {
+	// Logf, if non-nil, is the log function used for operational messages
+	// (sync progress, warnings, etc.). If nil, log.Printf is used.
+	Logf func(format string, args ...any)
+
 	mutationLogger       MutationLogger // non-nil when this is a self-updating corpus
 	mutationSource       MutationSource // from Initialize
 	verbose              bool
@@ -178,9 +182,18 @@ func (c *Corpus) SetDebug() {
 	c.debug = true
 }
 
-func (c *Corpus) debugf(format string, v ...any) {
+// logf logs a message using c.Logf if set, or log.Printf otherwise.
+func (c *Corpus) logf(format string, args ...any) {
+	if c.Logf != nil {
+		c.Logf(format, args...)
+	} else {
+		log.Printf(format, args...)
+	}
+}
+
+func (c *Corpus) debugf(format string, args ...any) {
 	if c.debug {
-		log.Printf(format, v...)
+		c.logf(format, args...)
 	}
 }
 
@@ -308,7 +321,7 @@ func (c *Corpus) Initialize(ctx context.Context, src MutationSource) error {
 		panic("duplicate call to Initialize")
 	}
 	c.mutationSource = src
-	log.Printf("Loading data from log %T ...", src)
+	c.logf("Loading data from log %T ...", src)
 	return c.update(ctx, nil)
 }
 
@@ -339,7 +352,7 @@ func (c *Corpus) Update(ctx context.Context) error {
 	if c.sawErrSplit {
 		panic("Update called after previous call returned ErrSplit")
 	}
-	log.Printf("Updating data from log %T ...", c.mutationSource)
+	c.logf("Updating data from log %T ...", c.mutationSource)
 	err := c.update(ctx, nil)
 	if err == ErrSplit {
 		c.sawErrSplit = true
@@ -358,7 +371,7 @@ func (c *Corpus) UpdateWithLocker(ctx context.Context, lk sync.Locker) error {
 	if c.sawErrSplit {
 		panic("UpdateWithLocker called after previous call returned ErrSplit")
 	}
-	log.Printf("Updating data from log %T ...", c.mutationSource)
+	c.logf("Updating data from log %T ...", c.mutationSource)
 	err := c.update(ctx, lk)
 	if err == ErrSplit {
 		c.sawErrSplit = true
@@ -398,7 +411,7 @@ func (c *Corpus) RunUpdateLoop(ctx context.Context) error {
 			}
 
 			if e.Err != nil {
-				log.Printf("Corpus GetMutations: %v", e.Err)
+				c.logf("Corpus GetMutations: %v", e.Err)
 				if e.Err == ErrSplit {
 					c.sawErrSplit = true
 				}
@@ -438,11 +451,11 @@ func (c *Corpus) update(ctx context.Context, lk sync.Locker) error {
 		select {
 		case <-done:
 			err := ctx.Err()
-			log.Printf("Context expired while loading data from log %T: %v", src, err)
+			c.logf("Context expired while loading data from log %T: %v", src, err)
 			return err
 		case e := <-ch:
 			if e.Err != nil {
-				log.Printf("Corpus GetMutations: %v", e.Err)
+				c.logf("Corpus GetMutations: %v", e.Err)
 				return e.Err
 			}
 			if e.End {
@@ -450,7 +463,7 @@ func (c *Corpus) update(ctx context.Context, lk sync.Locker) error {
 				lk.Lock()
 				c.finishProcessing()
 				lk.Unlock()
-				log.Printf("Reloaded data from log %T.", src)
+				c.logf("Reloaded data from log %T.", src)
 				return nil
 			}
 			lk.Lock()
@@ -463,7 +476,7 @@ func (c *Corpus) update(ctx context.Context, lk sync.Locker) error {
 // addMutation adds a mutation to the log and immediately processes it.
 func (c *Corpus) addMutation(m *maintpb.Mutation) {
 	if c.verbose {
-		log.Printf("mutation: %v", m)
+		c.logf("mutation: %v", m)
 	}
 	c.mu.Lock()
 	c.processMutationLocked(m)
@@ -527,15 +540,15 @@ func (c *Corpus) sync(ctx context.Context, loop bool) error {
 	for _, w := range c.watchedGithubRepos {
 		gr, ts, filter := w.gr, w.tokenSource, w.filter
 		group.Go(func() error {
-			log.Printf("Polling %v ...", gr.id)
+			c.logf("Polling %v ...", gr.id)
 			for {
 				err := gr.sync(ctx, ts, filter, loop)
 				if loop && isTempErr(err) {
-					log.Printf("Temporary error from github %v: %v", gr.ID(), err)
+					c.logf("Temporary error from github %v: %v", gr.ID(), err)
 					time.Sleep(30 * time.Second)
 					continue
 				}
-				log.Printf("github sync ending for %v: %v", gr.ID(), err)
+				c.logf("github sync ending for %v: %v", gr.ID(), err)
 				return err
 			}
 		})
@@ -545,11 +558,11 @@ func (c *Corpus) sync(ctx context.Context, loop bool) error {
 			for {
 				err := c.syncGitCommits(ctx, rp, loop)
 				if loop && isTempErr(err) {
-					log.Printf("Temporary error from git repo %v: %v", rp.dir, err)
+					c.logf("Temporary error from git repo %v: %v", rp.dir, err)
 					time.Sleep(30 * time.Second)
 					continue
 				}
-				log.Printf("git sync ending for %v: %v", rp.dir, err)
+				c.logf("git sync ending for %v: %v", rp.dir, err)
 				return err
 			}
 		})
@@ -557,15 +570,15 @@ func (c *Corpus) sync(ctx context.Context, loop bool) error {
 	for i := range c.watchedGitRepoConfigs {
 		ws := &c.watchedGitRepoConfigs[i]
 		group.Go(func() error {
-			log.Printf("Polling git repo %v ...", ws.conf.Name)
+			c.logf("Polling git repo %v ...", ws.conf.Name)
 			for {
 				err := c.syncGitRepo(ctx, ws, loop)
 				if loop && isTempErr(err) {
-					log.Printf("Temporary error from git repo %v: %v", ws.conf.Name, err)
+					c.logf("Temporary error from git repo %v: %v", ws.conf.Name, err)
 					time.Sleep(30 * time.Second)
 					continue
 				}
-				log.Printf("git repo sync ending for %v: %v", ws.conf.Name, err)
+				c.logf("git repo sync ending for %v: %v", ws.conf.Name, err)
 				return err
 			}
 		})
@@ -573,15 +586,15 @@ func (c *Corpus) sync(ctx context.Context, loop bool) error {
 	for _, w := range c.watchedGerritRepos {
 		gp := w.project
 		group.Go(func() error {
-			log.Printf("Polling gerrit %v ...", gp.proj)
+			c.logf("Polling gerrit %v ...", gp.proj)
 			for {
 				err := gp.sync(ctx, loop)
 				if loop && isTempErr(err) {
-					log.Printf("Temporary error from gerrit %v: %v", gp.proj, err)
+					c.logf("Temporary error from gerrit %v: %v", gp.proj, err)
 					time.Sleep(30 * time.Second)
 					continue
 				}
-				log.Printf("gerrit sync ending for %v: %v", gp.proj, err)
+				c.logf("gerrit sync ending for %v: %v", gp.proj, err)
 				return err
 			}
 		})
@@ -590,7 +603,7 @@ func (c *Corpus) sync(ctx context.Context, loop bool) error {
 }
 
 func isTempErr(err error) bool {
-	log.Printf("IS TEMP ERROR? %T %v", err, err)
+	log.Printf("IS TEMP ERROR? %T %v", err, err) // keep as log.Printf; no corpus context
 	return true
 }
 

@@ -1796,6 +1796,10 @@ func (gr *GitHubRepo) sync(ctx context.Context, tokenSource oauth2.TokenSource, 
 		githubCaching: github.NewClient(&http.Client{Transport: cachingTransport}),
 		client:        &http.Client{Transport: directTransport},
 	}
+	if p.c.reactionScanInterval > 0 && loop && p.filter().Reactions {
+		go p.reactionScanLoop(ctx)
+	}
+
 	activityCh := gr.github.c.activityChan("github:" + gr.id.String())
 	var expectChanges bool // got webhook update, but haven't seen new data yet
 	var sleepDelay time.Duration
@@ -1862,7 +1866,6 @@ type githubRepoPoller struct {
 	// populated during syncIssues/syncComments to detect reaction changes
 	// opportunistically from REST responses.
 	staleReactionIssues map[int32]bool // issue numbers needing reaction detail fetch
-	lastReactionScan    time.Time      // when the last full GraphQL scan ran
 }
 
 // filter returns the effective sync filter, defaulting if nil.
@@ -1931,7 +1934,8 @@ func (p *githubRepoPoller) syncPullRequests(ctx context.Context) error {
 		return nil
 	}
 	p.logf("syncing PR details for %d pull requests", len(nums))
-	for _, num := range nums {
+	for i, num := range nums {
+		p.logf("PR details: %d/%d (PR #%d)", i+1, len(nums), num)
 		if err := p.syncPullRequestDetails(ctx, num); err != nil {
 			return err
 		}
@@ -2224,6 +2228,12 @@ func (p *githubRepoPoller) syncActions(ctx context.Context) error {
 // maxActionsAge is how far back to sync workflow runs on initial sync.
 const maxActionsAge = 6 * 30 * 24 * time.Hour // ~6 months
 
+// Time format constants for Actions sync logging and API queries.
+const (
+	actionsTimeFormat    = "2006-01-02T15:04"     // minute-precision, for log messages
+	actionsAPITimeFormat = "2006-01-02T15:04:05Z" // second-precision UTC, for GitHub API created range queries
+)
+
 func (p *githubRepoPoller) syncWorkflowRuns(ctx context.Context) error {
 	p.logf("syncing Actions workflow runs")
 
@@ -2239,7 +2249,7 @@ func (p *githubRepoPoller) syncWorkflowRuns(ctx context.Context) error {
 	if !f.ActionsSince.IsZero() {
 		since = f.ActionsSince
 		p.logf("Actions: backfill from %s (--actions-since override, %d runs in corpus)",
-			since.Format("2006-01-02"), len(p.gr.workflowRuns))
+			since.Format(actionsTimeFormat), len(p.gr.workflowRuns))
 	} else {
 		p.c.mu.RLock()
 		for _, run := range p.gr.workflowRuns {
@@ -2251,59 +2261,159 @@ func (p *githubRepoPoller) syncWorkflowRuns(ctx context.Context) error {
 
 		if since.IsZero() {
 			since = now.Add(-maxActionsAge)
-			p.logf("Actions: initial sync, fetching runs back to %s", since.Format("2006-01-02"))
+			p.logf("Actions: initial sync, fetching runs back to %s", since.Format(actionsTimeFormat))
 		} else {
-			// Back up one day to catch any runs created near the boundary
-			// that might have been updated since.
-			since = since.Add(-24 * time.Hour)
 			p.logf("Actions: incremental sync from %s (%d runs in corpus)",
-				since.Format("2006-01-02"), len(p.gr.workflowRuns))
+				since.Format(actionsTimeFormat), len(p.gr.workflowRuns))
 		}
 	}
 
-	// Walk forward in 1-day windows from `since` to now.
-	// The GitHub API caps results at 1000 per query (10 pages of 100),
-	// so daily windows are needed for repos with high CI volume.
 	var totalNew, totalSkipped int
 
-	// Use a stack of time windows. Start with daily windows.
-	// If any window hits the 1000-result API cap, split it in half.
-	type window struct{ start, end time.Time }
-	var windows []window
-	for ws := since; ws.Before(now); ws = ws.Add(24 * time.Hour) {
-		we := ws.Add(24 * time.Hour)
-		if we.After(now) {
-			we = now
-		}
-		windows = append(windows, window{ws, we})
-	}
-
-	for len(windows) > 0 {
-		w := windows[0]
-		windows = windows[1:]
-
-		windowNew, windowTotal, err := p.syncWorkflowRunsWindow(ctx, w.start, w.end, &totalNew, &totalSkipped)
+	// Fetch all runs created >= since, narrowing the end time via binary
+	// search if the result set exceeds the GitHub API's 1000-result cap.
+	// Runs are buffered and inserted oldest-first so the corpus high-water
+	// mark (max Created) advances monotonically, making it safe to abort
+	// and restart at any point.
+	end := now
+	for since.Before(end) {
+		runs, err := p.fetchWorkflowRunsWindow(ctx, since, end)
 		if err != nil {
 			return err
 		}
 
-		// If we hit the 1000-result cap and the window is wider than 1 hour,
-		// split it in half and retry both halves.
-		if windowTotal >= 1000 && w.end.Sub(w.start) > time.Hour {
-			mid := w.start.Add(w.end.Sub(w.start) / 2)
-			p.logf("Actions: window %s..%s had %d results (cap 1000), splitting",
-				w.start.Format("2006-01-02T15:04"), w.end.Format("2006-01-02T15:04"), windowTotal)
-			// Undo the mutations we already emitted? No — they're fine, we just
-			// need to also fetch the ones we missed. The second pass will skip
-			// already-known runs. Prepend both halves.
-			windows = append([]window{{w.start, mid}, {mid, w.end}}, windows...)
-			continue
+		if len(runs) >= 1000 {
+			// We hit the API cap — the oldest runs in [since, end) may be
+			// missing. Binary-search: shrink end toward since until the
+			// window is small enough that we get < 1000 results, meaning
+			// we have all runs in [since, newEnd).
+			newEnd, err := p.bsearchWorkflowRunsEnd(ctx, since, end)
+			if err != nil {
+				return err
+			}
+			// Re-fetch the narrowed window to get the complete set.
+			runs, err = p.fetchWorkflowRunsWindow(ctx, since, newEnd)
+			if err != nil {
+				return err
+			}
+			end = newEnd
 		}
-		_ = windowNew
+
+		// Sort oldest-first so mutations are inserted in Created order.
+		slices.SortFunc(runs, func(a, b *github.WorkflowRun) int {
+			return a.GetCreatedAt().Time.Compare(b.GetCreatedAt().Time)
+		})
+
+		windowNew := 0
+		for _, run := range runs {
+			p.c.mu.RLock()
+			existing := p.gr.workflowRuns[run.GetID()]
+			p.c.mu.RUnlock()
+
+			if existing != nil && existing.Updated.Equal(run.GetUpdatedAt().Time) {
+				totalSkipped++
+				continue
+			}
+
+			runMut := workflowRunToProto(run)
+			p.c.addMutation(&maintpb.Mutation{
+				GithubActions: &maintpb.GithubActionsMutation{
+					Owner: p.Owner(),
+					Repo:  p.Repo(),
+					Run:   runMut,
+				},
+			})
+
+			if err := p.syncWorkflowJobs(ctx, run.GetID()); err != nil {
+				return err
+			}
+			totalNew++
+			windowNew++
+		}
+
+		p.logf("Actions: %s..%s — %d runs (%d new, %d skipped)",
+			since.Format(actionsTimeFormat), end.Format(actionsTimeFormat),
+			len(runs), windowNew, len(runs)-windowNew)
+
+		// Advance past this window for the next iteration.
+		since = end
+		end = now
 	}
 
 	p.logf("Actions: done. %d new runs synced, %d unchanged", totalNew, totalSkipped)
 	return nil
+}
+
+// fetchWorkflowRunsWindow fetches all workflow runs with Created in [start, end),
+// paginating through all available pages. The GitHub API returns results newest-first
+// and caps at 1000 results (10 pages of 100). Returns up to 1000 runs.
+func (p *githubRepoPoller) fetchWorkflowRunsWindow(ctx context.Context, start, end time.Time) ([]*github.WorkflowRun, error) {
+	created := start.Format(actionsAPITimeFormat) + ".." + end.Format(actionsAPITimeFormat)
+	opts := &github.ListWorkflowRunsOptions{
+		Created:     created,
+		ListOptions: github.ListOptions{PerPage: 100},
+	}
+
+	var all []*github.WorkflowRun
+	for {
+		runs, resp, err := retryGitHubAPI(ctx, p.logf, "listing workflow runs", func() (*github.WorkflowRuns, *github.Response, error) {
+			return p.githubDirect.Actions.ListRepositoryWorkflowRuns(ctx, p.Owner(), p.Repo(), opts)
+		})
+		if err != nil {
+			return nil, fmt.Errorf("listing workflow runs: %w", err)
+		}
+		all = append(all, runs.WorkflowRuns...)
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+	return all, nil
+}
+
+// bsearchWorkflowRunsEnd binary-searches for the largest end time in [start, outerEnd)
+// such that the number of workflow runs in [start, end) is under 1000 (the API cap).
+// This ensures we get a complete result set that overlaps with the corpus.
+func (p *githubRepoPoller) bsearchWorkflowRunsEnd(ctx context.Context, start, outerEnd time.Time) (time.Time, error) {
+	lo := start
+	hi := outerEnd
+	best := start.Add(time.Hour) // minimum window: 1 hour
+	if best.After(outerEnd) {
+		best = outerEnd
+	}
+
+	for hi.Sub(lo) > time.Minute {
+		mid := lo.Add(hi.Sub(lo) / 2)
+		count, err := p.countWorkflowRuns(ctx, start, mid)
+		if err != nil {
+			return time.Time{}, err
+		}
+		p.logf("Actions: bsearch %s..%s: %d runs",
+			start.Format(actionsTimeFormat), mid.Format(actionsTimeFormat), count)
+		if count < 1000 {
+			best = mid
+			lo = mid
+		} else {
+			hi = mid
+		}
+	}
+	return best, nil
+}
+
+// countWorkflowRuns returns the total number of workflow runs in [start, end)
+// using a single API call with PerPage=1 to read TotalCount.
+func (p *githubRepoPoller) countWorkflowRuns(ctx context.Context, start, end time.Time) (int, error) {
+	created := start.Format(actionsAPITimeFormat) + ".." + end.Format(actionsAPITimeFormat)
+	runs, _, err := retryGitHubAPI(ctx, p.logf, "counting workflow runs", func() (*github.WorkflowRuns, *github.Response, error) {
+		return p.githubDirect.Actions.ListRepositoryWorkflowRuns(ctx, p.Owner(), p.Repo(), &github.ListWorkflowRunsOptions{
+			Created:     created,
+			ListOptions: github.ListOptions{PerPage: 1},
+		})
+	})
+	if err != nil {
+		return 0, err
+	}
+	return runs.GetTotalCount(), nil
 }
 
 // retryGitHubAPI retries fn on transient errors (5xx, network) with
@@ -2389,7 +2499,7 @@ func (p *githubRepoPoller) syncWorkflowRunsBackfillGaps(ctx context.Context) err
 		sort.Slice(gaps, func(i, j int) bool { return gaps[i].dur > gaps[j].dur })
 
 		p.logf("Actions backfill: round %d — %d gaps > 1h, largest: %s (%s to %s), %d runs in corpus",
-			round, len(gaps), gaps[0].dur.Round(time.Minute), gaps[0].start.Format("2006-01-02T15:04"), gaps[0].end.Format("2006-01-02T15:04"), corpusSize)
+			round, len(gaps), gaps[0].dur.Round(time.Minute), gaps[0].start.Format(actionsTimeFormat), gaps[0].end.Format(actionsTimeFormat), corpusSize)
 
 		// Attack the largest gap using daily windows from the start.
 		g := gaps[0]
@@ -2409,7 +2519,7 @@ func (p *githubRepoPoller) syncWorkflowRunsBackfillGaps(ctx context.Context) err
 				if n2 > 0 {
 					anyNew = true
 					p.logf("Actions backfill: gap %s..%s: %d new",
-						g2.start.Format("2006-01-02T15:04"), g2.end.Format("2006-01-02T15:04"), n2)
+						g2.start.Format(actionsTimeFormat), g2.end.Format(actionsTimeFormat), n2)
 					break
 				}
 			}
@@ -2426,7 +2536,7 @@ func (p *githubRepoPoller) syncWorkflowRunsBackfillGaps(ctx context.Context) err
 // reports 0 total runs in the range.
 func (p *githubRepoPoller) backfillGap(ctx context.Context, start, end time.Time) (int, error) {
 	// Probe: single API call to check if there's anything in this range.
-	created := start.Format("2006-01-02T15:04:05Z") + ".." + end.Format("2006-01-02T15:04:05Z")
+	created := start.Format(actionsAPITimeFormat) + ".." + end.Format(actionsAPITimeFormat)
 	probe, _, err := retryGitHubAPI(ctx, p.logf, "probing gap", func() (*github.WorkflowRuns, *github.Response, error) {
 		return p.githubDirect.Actions.ListRepositoryWorkflowRuns(ctx, p.Owner(), p.Repo(), &github.ListWorkflowRunsOptions{
 			Created:     created,
@@ -2438,12 +2548,12 @@ func (p *githubRepoPoller) backfillGap(ctx context.Context, start, end time.Time
 	}
 	if probe.GetTotalCount() == 0 {
 		p.logf("Actions backfill: gap %s..%s (%s): empty, skipping",
-			start.Format("2006-01-02T15:04"), end.Format("2006-01-02T15:04"),
+			start.Format(actionsTimeFormat), end.Format(actionsTimeFormat),
 			end.Sub(start).Round(time.Minute))
 		return 0, nil
 	}
 	p.logf("Actions backfill: gap %s..%s (%s): ~%d runs, walking daily",
-		start.Format("2006-01-02T15:04"), end.Format("2006-01-02T15:04"),
+		start.Format(actionsTimeFormat), end.Format(actionsTimeFormat),
 		end.Sub(start).Round(time.Minute), probe.GetTotalCount())
 
 	var totalNew, totalSkipped int
@@ -2461,67 +2571,57 @@ func (p *githubRepoPoller) backfillGap(ctx context.Context, start, end time.Time
 	}
 
 	p.logf("Actions backfill: gap %s..%s: %d new, %d skipped",
-		start.Format("2006-01-02T15:04"), end.Format("2006-01-02T15:04"),
+		start.Format(actionsTimeFormat), end.Format(actionsTimeFormat),
 		totalNew, totalSkipped)
 	return totalNew, nil
 }
 
 // syncWorkflowRunsWindow fetches all workflow runs in [start, end) and returns
 // the count of new runs, total runs seen, and any error.
+// Used by backfillGap which walks daily windows.
 func (p *githubRepoPoller) syncWorkflowRunsWindow(ctx context.Context, start, end time.Time, totalNew, totalSkipped *int) (windowNew, windowTotal int, _ error) {
-	created := start.Format("2006-01-02T15:04:05Z") + ".." + end.Format("2006-01-02T15:04:05Z")
-	opts := &github.ListWorkflowRunsOptions{
-		Created:     created,
-		ListOptions: github.ListOptions{PerPage: 100},
+	runs, err := p.fetchWorkflowRunsWindow(ctx, start, end)
+	if err != nil {
+		return 0, 0, err
 	}
 
-	for {
-		runs, runsResp, err := retryGitHubAPI(ctx, p.logf, "listing workflow runs", func() (*github.WorkflowRuns, *github.Response, error) {
-			return p.githubDirect.Actions.ListRepositoryWorkflowRuns(ctx, p.Owner(), p.Repo(), opts)
+	// Sort oldest-first for consistent mutation ordering.
+	slices.SortFunc(runs, func(a, b *github.WorkflowRun) int {
+		return a.GetCreatedAt().Time.Compare(b.GetCreatedAt().Time)
+	})
+
+	for _, run := range runs {
+		windowTotal++
+
+		p.c.mu.RLock()
+		existing := p.gr.workflowRuns[run.GetID()]
+		p.c.mu.RUnlock()
+
+		if existing != nil && existing.Updated.Equal(run.GetUpdatedAt().Time) {
+			*totalSkipped++
+			continue
+		}
+
+		runMut := workflowRunToProto(run)
+		p.c.addMutation(&maintpb.Mutation{
+			GithubActions: &maintpb.GithubActionsMutation{
+				Owner: p.Owner(),
+				Repo:  p.Repo(),
+				Run:   runMut,
+			},
 		})
-		if err != nil {
-			return windowNew, windowTotal, fmt.Errorf("listing workflow runs: %w", err)
+
+		if err := p.syncWorkflowJobs(ctx, run.GetID()); err != nil {
+			return windowNew, windowTotal, err
 		}
-
-		pageNew, pageSkipped := 0, 0
-		for _, run := range runs.WorkflowRuns {
-			windowTotal++
-
-			p.c.mu.RLock()
-			existing := p.gr.workflowRuns[run.GetID()]
-			p.c.mu.RUnlock()
-
-			if existing != nil && existing.Updated.Equal(run.GetUpdatedAt().Time) {
-				*totalSkipped++
-				pageSkipped++
-				continue
-			}
-
-			runMut := workflowRunToProto(run)
-			p.c.addMutation(&maintpb.Mutation{
-				GithubActions: &maintpb.GithubActionsMutation{
-					Owner: p.Owner(),
-					Repo:  p.Repo(),
-					Run:   runMut,
-				},
-			})
-
-			if err := p.syncWorkflowJobs(ctx, run.GetID()); err != nil {
-				return windowNew, windowTotal, err
-			}
-			*totalNew++
-			windowNew++
-			pageNew++
-		}
-
-		p.logf("Actions: %s — page %d: %d new, %d skipped (total: %d new, %d skipped)",
-			start.Format("2006-01-02T15:04"), opts.Page, pageNew, pageSkipped, *totalNew, *totalSkipped)
-
-		if runsResp.NextPage == 0 {
-			break
-		}
-		opts.Page = runsResp.NextPage
+		*totalNew++
+		windowNew++
 	}
+
+	p.logf("Actions: %s..%s — %d runs (%d new, %d skipped)",
+		start.Format(actionsTimeFormat), end.Format(actionsTimeFormat),
+		windowTotal, windowNew, windowTotal-windowNew)
+
 	return windowNew, windowTotal, nil
 }
 
@@ -3050,155 +3150,260 @@ func (p *githubRepoPoller) graphqlRequest(ctx context.Context, query string, var
 	if err := json.NewDecoder(resp.Body).Decode(&gqlResp); err != nil {
 		return fmt.Errorf("graphql: decoding response: %w", err)
 	}
-	if len(gqlResp.Errors) > 0 {
+	if len(gqlResp.Errors) > 0 && len(gqlResp.Data) == 0 {
 		return fmt.Errorf("graphql: %s", gqlResp.Errors[0].Message)
+	}
+	if len(gqlResp.Data) == 0 {
+		return fmt.Errorf("graphql: no data in response")
 	}
 	return json.Unmarshal(gqlResp.Data, result)
 }
 
-// reactionCountScanQuery uses conservative page sizes (25 issues, 50
-// comments) to stay within GitHub's GraphQL resource limits on large repos.
-const reactionCountScanQuery = `
-query($owner: String!, $name: String!, $cursor: String) {
-  repository(owner: $owner, name: $name) {
-    issues(first: 25, after: $cursor, orderBy: {field: CREATED_AT, direction: ASC}) {
-      pageInfo { hasNextPage endCursor }
-      nodes {
-        number
-        reactions { totalCount }
-        comments(first: 50) {
-          pageInfo { hasNextPage endCursor }
-          nodes {
-            databaseId
-            reactions { totalCount }
-          }
-        }
-      }
-    }
-  }
-}
-`
+// reactionScanBatchSize is how many issues to check per GraphQL request
+// when scanning for reaction count changes. Each issue includes up to 100
+// comments with reaction counts, so we keep this moderate to stay within
+// GitHub's GraphQL complexity limits.
+const reactionScanBatchSize = 10
 
-// scanReactionCounts uses the GitHub GraphQL API to efficiently scan all
-// issues and their comments for reaction count changes.
-func (p *githubRepoPoller) scanReactionCounts(ctx context.Context) error {
-	owner, repo := p.gr.id.Owner, p.gr.id.Repo
-	p.logf("scanning reaction counts via GraphQL...")
+// minReactionScanInterval is the minimum time to complete a full reaction
+// scan across all issues. The scan paces itself to take at least this long.
+const minReactionScanInterval = 24 * time.Hour
 
-	var cursor *string
-	scanned := 0
+// reactionScanLoop runs in its own goroutine, continuously scanning issues
+// for reaction count changes. It paces itself to complete a full pass over
+// all issues in >= minReactionScanInterval.
+//
+// On startup, the scan position is set deterministically based on time of
+// day so that restarts don't always re-scan from the beginning.
+func (p *githubRepoPoller) reactionScanLoop(ctx context.Context) {
+	// Build sorted issue list and pick starting position.
+	issues, pos := p.buildReactionScanList()
+	if len(issues) == 0 {
+		p.logf("reaction scan: no issues, not scanning")
+		return
+	}
+
+	sleepPerBatch := minReactionScanInterval / time.Duration((len(issues)+reactionScanBatchSize-1)/reactionScanBatchSize)
+
+	p.logf("reaction scan: %d issues, starting at position %d (%.0f%% through day), %v between batches",
+		len(issues), pos,
+		float64(pos)/float64(len(issues))*100,
+		sleepPerBatch.Round(time.Second))
+
 	for {
-		vars := map[string]any{
-			"owner": owner,
-			"name":  repo,
-		}
-		if cursor != nil {
-			vars["cursor"] = *cursor
-		}
-
-		var result struct {
-			Repository struct {
-				Issues struct {
-					PageInfo struct {
-						HasNextPage bool   `json:"hasNextPage"`
-						EndCursor   string `json:"endCursor"`
-					} `json:"pageInfo"`
-					Nodes []struct {
-						Number    int `json:"number"`
-						Reactions struct {
-							TotalCount int `json:"totalCount"`
-						} `json:"reactions"`
-						Comments struct {
-							PageInfo struct {
-								HasNextPage bool   `json:"hasNextPage"`
-								EndCursor   string `json:"endCursor"`
-							} `json:"pageInfo"`
-							Nodes []struct {
-								DatabaseId int `json:"databaseId"`
-								Reactions  struct {
-									TotalCount int `json:"totalCount"`
-								} `json:"reactions"`
-							} `json:"nodes"`
-						} `json:"comments"`
-					} `json:"nodes"`
-				} `json:"issues"`
-			} `json:"repository"`
+		// Collect a batch of issue numbers.
+		batch := make([]int32, 0, reactionScanBatchSize)
+		for len(batch) < reactionScanBatchSize && len(batch) < len(issues) {
+			batch = append(batch, issues[pos])
+			pos = (pos + 1) % len(issues)
 		}
 
-		if err := p.graphqlRequest(ctx, reactionCountScanQuery, vars, &result); err != nil {
-			return fmt.Errorf("reaction count scan: %w", err)
+		staleNums, err := p.checkReactionCountsBatch(ctx, batch)
+		if ctx.Err() != nil {
+			return
 		}
-
-		p.c.mu.RLock()
-		for _, issue := range result.Repository.Issues.Nodes {
-			num := int32(issue.Number)
-			gi := p.gr.issues[num]
-
-			// Check issue-body reactions.
-			if gi == nil {
-				continue
+		if err != nil {
+			p.logf("reaction scan: error checking batch: %v", err)
+			// Back off on error.
+			select {
+			case <-time.After(time.Minute):
+			case <-ctx.Done():
+				return
 			}
-			if issue.Reactions.TotalCount != len(gi.reactions) {
-				p.staleReactionIssues[num] = true
-			}
-			// Also re-scan if never synced or stale (>24h).
-			if gi.reactionsSyncedAsOf.IsZero() {
-				if issue.Reactions.TotalCount > 0 || len(gi.reactions) > 0 {
-					p.staleReactionIssues[num] = true
+			continue
+		}
+
+		for _, num := range staleNums {
+			if err := p.syncReactionsOnIssue(ctx, num); err != nil {
+				if ctx.Err() != nil {
+					return
 				}
-			} else if time.Since(gi.reactionsSyncedAsOf) > 24*time.Hour && len(gi.reactions) > 0 {
-				p.staleReactionIssues[num] = true
+				p.logf("reaction scan: error syncing issue %d: %v", num, err)
 			}
+		}
 
-			// Check comment reactions.
+		if len(staleNums) > 0 {
+			p.logf("reaction scan: batch at pos %d/%d, %d stale",
+				pos, len(issues), len(staleNums))
+		}
+
+		// Wrap-around: rebuild the issue list to pick up new issues.
+		if pos == 0 {
+			p.logf("reaction scan: completed full pass, rebuilding issue list")
+			issues, _ = p.buildReactionScanList()
+			if len(issues) == 0 {
+				p.logf("reaction scan: no issues, stopping")
+				return
+			}
+			sleepPerBatch = minReactionScanInterval / time.Duration((len(issues)+reactionScanBatchSize-1)/reactionScanBatchSize)
+		}
+
+		select {
+		case <-time.After(sleepPerBatch):
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// buildReactionScanList returns all non-deleted issue numbers sorted by
+// Created time, and a starting position based on time of day.
+func (p *githubRepoPoller) buildReactionScanList() (issues []int32, startPos int) {
+	type issueTime struct {
+		num     int32
+		created time.Time
+	}
+	p.c.mu.RLock()
+	its := make([]issueTime, 0, len(p.gr.issues))
+	for num, gi := range p.gr.issues {
+		if gi.NotExist {
+			continue
+		}
+		its = append(its, issueTime{num, gi.Created})
+	}
+	p.c.mu.RUnlock()
+
+	slices.SortFunc(its, func(a, b issueTime) int {
+		return a.created.Compare(b.created)
+	})
+
+	issues = make([]int32, len(its))
+	for i, it := range its {
+		issues[i] = it.num
+	}
+
+	if len(issues) > 0 {
+		now := time.Now().UTC()
+		dayFraction := float64(now.Hour()*3600+now.Minute()*60+now.Second()) / 86400.0
+		startPos = int(dayFraction * float64(len(issues)))
+		if startPos >= len(issues) {
+			startPos = 0
+		}
+	}
+	return issues, startPos
+}
+
+// checkReactionCountsBatch queries GitHub's GraphQL API for reaction counts
+// on a batch of specific issue numbers. Returns issue numbers where counts
+// diverge from the corpus.
+func (p *githubRepoPoller) checkReactionCountsBatch(ctx context.Context, issueNums []int32) (staleNums []int32, _ error) {
+	if len(issueNums) == 0 {
+		return nil, nil
+	}
+
+	// Build a dynamic GraphQL query with aliases for each issue number.
+	var qb strings.Builder
+	qb.WriteString("query($owner: String!, $name: String!) {\n")
+	qb.WriteString("  repository(owner: $owner, name: $name) {\n")
+	for _, num := range issueNums {
+		fmt.Fprintf(&qb, "    i%d: issue(number: %d) {\n", num, num)
+		qb.WriteString("      number\n")
+		qb.WriteString("      reactions { totalCount }\n")
+		qb.WriteString("      comments(first: 100) {\n")
+		qb.WriteString("        nodes { databaseId reactions { totalCount } }\n")
+		qb.WriteString("      }\n")
+		qb.WriteString("    }\n")
+	}
+	qb.WriteString("  }\n")
+	qb.WriteString("}\n")
+
+	vars := map[string]any{
+		"owner": p.gr.id.Owner,
+		"name":  p.gr.id.Repo,
+	}
+
+	// Parse into a map since the aliases are dynamic.
+	var result struct {
+		Repository map[string]json.RawMessage `json:"repository"`
+	}
+	if err := p.graphqlRequest(ctx, qb.String(), vars, &result); err != nil {
+		return nil, fmt.Errorf("reaction count batch check: %w", err)
+	}
+
+	type gqlIssue struct {
+		Number    int `json:"number"`
+		Reactions struct {
+			TotalCount int `json:"totalCount"`
+		} `json:"reactions"`
+		Comments struct {
+			Nodes []struct {
+				DatabaseId int `json:"databaseId"`
+				Reactions  struct {
+					TotalCount int `json:"totalCount"`
+				} `json:"reactions"`
+			} `json:"nodes"`
+		} `json:"comments"`
+	}
+
+	p.c.mu.RLock()
+	defer p.c.mu.RUnlock()
+
+	for _, raw := range result.Repository {
+		if string(raw) == "null" {
+			continue // deleted/transferred issue
+		}
+		var issue gqlIssue
+		if err := json.Unmarshal(raw, &issue); err != nil {
+			continue
+		}
+		if issue.Number == 0 {
+			continue
+		}
+
+		num := int32(issue.Number)
+		gi := p.gr.issues[num]
+		if gi == nil {
+			continue
+		}
+
+		stale := false
+
+		if issue.Reactions.TotalCount != len(gi.reactions) {
+			stale = true
+		}
+		if gi.reactionsSyncedAsOf.IsZero() {
+			if issue.Reactions.TotalCount > 0 || len(gi.reactions) > 0 {
+				stale = true
+			}
+		} else if time.Since(gi.reactionsSyncedAsOf) > 24*time.Hour && len(gi.reactions) > 0 {
+			stale = true
+		}
+
+		if !stale {
 			for _, c := range issue.Comments.Nodes {
 				gc := gi.comments[int64(c.DatabaseId)]
 				if gc == nil {
 					continue
 				}
 				if c.Reactions.TotalCount != len(gc.reactions) {
-					p.staleReactionIssues[num] = true
+					stale = true
+					break
 				}
 			}
-
-			// TODO: handle comments.pageInfo.hasNextPage for issues with >100 comments.
 		}
-		p.c.mu.RUnlock()
 
-		scanned += len(result.Repository.Issues.Nodes)
-		if !result.Repository.Issues.PageInfo.HasNextPage {
-			break
+		if stale {
+			staleNums = append(staleNums, num)
 		}
-		endCursor := result.Repository.Issues.PageInfo.EndCursor
-		cursor = &endCursor
 	}
 
-	p.logf("reaction count scan complete: scanned %d issues, %d need updates", scanned, len(p.staleReactionIssues))
-	p.lastReactionScan = time.Now()
-	return nil
+	return staleNums, nil
 }
 
 // syncReactions fetches detailed reactions for issues detected as having
-// changed reaction counts (opportunistically during syncIssues/syncComments),
-// or via the opt-in GraphQL count scan.
+// changed reaction counts opportunistically during syncIssues/syncComments.
+// The background reaction scan (reactionScanLoop) handles the full scan
+// independently.
 func (p *githubRepoPoller) syncReactions(ctx context.Context) error {
-	// If GraphQL scanning is enabled and the scan interval has elapsed,
-	// run scanReactionCounts and merge results into staleReactionIssues.
-	if interval := p.c.reactionScanInterval; interval > 0 {
-		if p.lastReactionScan.IsZero() || time.Since(p.lastReactionScan) >= interval {
-			if err := p.scanReactionCounts(ctx); err != nil {
-				return err
-			}
-		}
-	}
-
 	if len(p.staleReactionIssues) == 0 {
 		return nil
 	}
 
 	issueNums := make([]int32, 0, len(p.staleReactionIssues))
-	for n := range p.staleReactionIssues {
-		issueNums = append(issueNums, n)
+	for n, needsSync := range p.staleReactionIssues {
+		if needsSync {
+			issueNums = append(issueNums, n)
+		}
 	}
 	slices.Sort(issueNums)
 

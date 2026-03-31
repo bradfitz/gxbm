@@ -104,10 +104,10 @@ func (c *Corpus) SetVerbose(v bool) { c.verbose = v }
 // when an issue is re-synced for another reason (e.g. comment edit,
 // label change).
 //
-// The interval controls how often the full count scan runs. A reasonable
-// default is 24 hours. Each scan pages through all issues via GraphQL
-// (~100 per request) to compare reaction counts, then fetches detailed
-// reactions only for issues where counts diverge.
+// If interval is positive, a background goroutine per repo continuously
+// scans issues via batched GraphQL queries, pacing itself to complete a
+// full pass in no less than 24 hours. On restart, the scan position is
+// set deterministically based on time of day.
 func (c *Corpus) EnableReactionScanning(interval time.Duration) {
 	c.reactionScanInterval = interval
 }

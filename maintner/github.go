@@ -1943,6 +1943,9 @@ func (p *githubRepoPoller) issueNumbersWithStalePRDetails() (issueNums []int32) 
 	p.c.mu.RLock()
 	defer p.c.mu.RUnlock()
 	for n, gi := range p.gr.issues {
+		if gi.NotExist {
+			continue
+		}
 		if gi.IsPullRequest() && !gi.prDetailsSyncedAsOf.After(gi.Updated) {
 			issueNums = append(issueNums, n)
 		}

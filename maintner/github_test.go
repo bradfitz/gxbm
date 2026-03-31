@@ -1601,3 +1601,265 @@ func TestForeachWorkflowRun(t *testing.T) {
 		t.Errorf("ForeachWorkflowRun IDs = %v; want %v", ids, want)
 	}
 }
+
+func TestProcessMutation_ProjectMetadata(t *testing.T) {
+	c := new(Corpus)
+
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubProject: &maintpb.GithubProjectMutation{
+			Owner:         "tailscale",
+			ProjectNodeId: "PVT_abc",
+			ProjectNumber: 42,
+			Title:         "My Project",
+			StatusOptions: []*maintpb.GithubProjectStatusOption{
+				{Id: "opt1", Name: "Todo"},
+				{Id: "opt2", Name: "In Progress"},
+				{Id: "opt3", Name: "Done"},
+			},
+		},
+	})
+
+	proj := c.github.projects["PVT_abc"]
+	if proj == nil {
+		t.Fatal("project not created")
+	}
+	if proj.Owner != "tailscale" {
+		t.Errorf("Owner = %q, want tailscale", proj.Owner)
+	}
+	if proj.Number != 42 {
+		t.Errorf("Number = %d, want 42", proj.Number)
+	}
+	if proj.Title != "My Project" {
+		t.Errorf("Title = %q, want My Project", proj.Title)
+	}
+	if len(proj.StatusOptions) != 3 {
+		t.Fatalf("StatusOptions len = %d, want 3", len(proj.StatusOptions))
+	}
+	if proj.StatusOptionName("opt2") != "In Progress" {
+		t.Errorf("StatusOptionName(opt2) = %q, want In Progress", proj.StatusOptionName("opt2"))
+	}
+
+	// Update title.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubProject: &maintpb.GithubProjectMutation{
+			Owner:         "tailscale",
+			ProjectNodeId: "PVT_abc",
+			Title:         "Renamed",
+		},
+	})
+	if proj.Title != "Renamed" {
+		t.Errorf("after update, Title = %q, want Renamed", proj.Title)
+	}
+	// Status options should be cleared (empty list in mutation replaces).
+	// Actually empty list does not replace — only non-empty does.
+	if len(proj.StatusOptions) != 3 {
+		t.Errorf("StatusOptions should be unchanged, got %d", len(proj.StatusOptions))
+	}
+}
+
+func TestProcessMutation_ProjectItems(t *testing.T) {
+	c := new(Corpus)
+
+	// Create an issue.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "tailscale",
+			Repo:   "tailscale",
+			Number: 100,
+			User:   &maintpb.GithubUser{Id: 1, Login: "user1"},
+		},
+	})
+
+	// Add project item.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "tailscale",
+			Repo:   "tailscale",
+			Number: 100,
+			ProjectItem: []*maintpb.GithubIssueProjectItem{
+				{
+					ProjectNodeId:  "PVT_abc",
+					ItemNodeId:     "PVTI_123",
+					StatusOptionId: "opt1",
+				},
+			},
+		},
+	})
+
+	gi := c.github.repos[GitHubRepoID{"tailscale", "tailscale"}].issues[100]
+	if !gi.InProject("PVT_abc") {
+		t.Error("issue should be in project PVT_abc")
+	}
+	if gi.InProject("PVT_other") {
+		t.Error("issue should not be in project PVT_other")
+	}
+
+	item := gi.projectItems["PVT_abc"]
+	if item == nil {
+		t.Fatal("project item not found")
+	}
+	if item.ItemNodeID != "PVTI_123" {
+		t.Errorf("ItemNodeID = %q, want PVTI_123", item.ItemNodeID)
+	}
+	if item.StatusOptionID != "opt1" {
+		t.Errorf("StatusOptionID = %q, want opt1", item.StatusOptionID)
+	}
+
+	// Update status.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "tailscale",
+			Repo:   "tailscale",
+			Number: 100,
+			ProjectItem: []*maintpb.GithubIssueProjectItem{
+				{
+					ProjectNodeId:  "PVT_abc",
+					ItemNodeId:     "PVTI_123",
+					StatusOptionId: "opt2",
+				},
+			},
+		},
+	})
+
+	if item = gi.projectItems["PVT_abc"]; item.StatusOptionID != "opt2" {
+		t.Errorf("after update, StatusOptionID = %q, want opt2", item.StatusOptionID)
+	}
+
+	// Remove from project.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:                "tailscale",
+			Repo:                 "tailscale",
+			Number:               100,
+			RemovedProjectItemId: []string{"PVT_abc"},
+		},
+	})
+
+	if gi.InProject("PVT_abc") {
+		t.Error("issue should no longer be in project PVT_abc")
+	}
+}
+
+func TestProcessMutation_ProjectEvents(t *testing.T) {
+	c := new(Corpus)
+
+	// Create an issue.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "tailscale",
+			Repo:   "tailscale",
+			Number: 200,
+			User:   &maintpb.GithubUser{Id: 1, Login: "user1"},
+		},
+	})
+
+	// Add project events.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "tailscale",
+			Repo:   "tailscale",
+			Number: 200,
+			ProjectEvent: []*maintpb.GithubProjectEvent{
+				{
+					Id:            "ev1",
+					EventType:     "added",
+					ActorId:       42,
+					ProjectNodeId: "PVT_abc",
+					WasAutomated:  true,
+				},
+				{
+					Id:             "ev2",
+					EventType:      "status_changed",
+					ActorId:        42,
+					ProjectNodeId:  "PVT_abc",
+					PreviousStatus: "Todo",
+					Status:         "In Progress",
+				},
+			},
+		},
+	})
+
+	gi := c.github.repos[GitHubRepoID{"tailscale", "tailscale"}].issues[200]
+	if len(gi.projectEvents) != 2 {
+		t.Fatalf("got %d project events, want 2", len(gi.projectEvents))
+	}
+
+	ev1 := gi.projectEvents["ev1"]
+	if ev1.Type != "added" {
+		t.Errorf("ev1 Type = %q, want added", ev1.Type)
+	}
+	if !ev1.WasAutomated {
+		t.Error("ev1 should be automated")
+	}
+	if ev1.Actor == nil || ev1.Actor.ID != 42 {
+		t.Error("ev1 actor should have ID 42")
+	}
+
+	ev2 := gi.projectEvents["ev2"]
+	if ev2.Type != "status_changed" {
+		t.Errorf("ev2 Type = %q, want status_changed", ev2.Type)
+	}
+	if ev2.PreviousStatus != "Todo" || ev2.Status != "In Progress" {
+		t.Errorf("ev2 status = %q -> %q, want Todo -> In Progress", ev2.PreviousStatus, ev2.Status)
+	}
+
+	// Duplicate events should not be added (same ID).
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "tailscale",
+			Repo:   "tailscale",
+			Number: 200,
+			ProjectEvent: []*maintpb.GithubProjectEvent{
+				{
+					Id:        "ev1",
+					EventType: "added",
+				},
+			},
+		},
+	})
+	// Should still have 2 events (ev1 was updated in place, not duplicated).
+	if len(gi.projectEvents) != 2 {
+		t.Fatalf("after re-adding ev1, got %d events, want 2", len(gi.projectEvents))
+	}
+}
+
+func TestProjectStatusName(t *testing.T) {
+	c := new(Corpus)
+
+	// Create project with status options.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubProject: &maintpb.GithubProjectMutation{
+			Owner:         "tailscale",
+			ProjectNodeId: "PVT_abc",
+			ProjectNumber: 1,
+			Title:         "Test",
+			StatusOptions: []*maintpb.GithubProjectStatusOption{
+				{Id: "opt1", Name: "Todo"},
+				{Id: "opt2", Name: "Done"},
+			},
+		},
+	})
+
+	// Create issue in the project.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "tailscale",
+			Repo:   "tailscale",
+			Number: 1,
+			User:   &maintpb.GithubUser{Id: 1},
+			ProjectItem: []*maintpb.GithubIssueProjectItem{
+				{ProjectNodeId: "PVT_abc", ItemNodeId: "PVTI_1", StatusOptionId: "opt1"},
+			},
+		},
+	})
+
+	proj := c.github.projects["PVT_abc"]
+	gi := c.github.repos[GitHubRepoID{"tailscale", "tailscale"}].issues[1]
+
+	if got := gi.ProjectStatusName(proj); got != "Todo" {
+		t.Errorf("ProjectStatusName = %q, want Todo", got)
+	}
+	if got := gi.ProjectStatusName(nil); got != "" {
+		t.Errorf("ProjectStatusName(nil) = %q, want empty", got)
+	}
+}

@@ -53,10 +53,11 @@ func (id GitHubRepoID) valid() bool {
 
 // GitHub holds data about a GitHub repo.
 type GitHub struct {
-	c     *Corpus
-	users map[int64]*GitHubUser
-	teams map[int64]*GitHubTeam
-	repos map[GitHubRepoID]*GitHubRepo
+	c        *Corpus
+	users    map[int64]*GitHubUser
+	teams    map[int64]*GitHubTeam
+	repos    map[GitHubRepoID]*GitHubRepo
+	projects map[string]*GitHubProject // project node ID ("PVT_xxx") -> project
 }
 
 // ForeachRepo calls fn serially for each GitHubRepo, stopping if fn
@@ -84,6 +85,21 @@ func (g *GitHub) ForeachRepo(fn func(*GitHubRepo) error) error {
 // Repo returns the repo if it's known. Otherwise it returns nil.
 func (g *GitHub) Repo(owner, repo string) *GitHubRepo {
 	return g.repos[GitHubRepoID{owner, repo}]
+}
+
+// Project returns the project with the given node ID, or nil if unknown.
+func (g *GitHub) Project(nodeID string) *GitHubProject {
+	return g.projects[nodeID]
+}
+
+// ForeachProject calls fn for each known project, in unsorted order.
+func (g *GitHub) ForeachProject(fn func(*GitHubProject) error) error {
+	for _, p := range g.projects {
+		if err := fn(p); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (g *GitHub) getOrCreateRepo(owner, repo string) *GitHubRepo {
@@ -114,12 +130,45 @@ type GitHubRepo struct {
 	milestones   map[int64]*GitHubMilestone
 	labels       map[int64]*GitHubLabel
 	workflowRuns map[int64]*GitHubWorkflowRun // run ID -> run
+	numComments  int                          // running total across all issues
+	projects     map[string]bool              // project node IDs seen via project items
+	openIssues   int
+	closedIssues int
+	openPRs      int
+	closedPRs    int
 }
 
 func (gr *GitHubRepo) ID() GitHubRepoID { return gr.id }
 
 // Issue returns the provided issue number, or nil if it's not known.
 func (gr *GitHubRepo) Issue(n int32) *GitHubIssue { return gr.issues[n] }
+
+// NumIssues returns the number of issues (including PRs) known in this repo.
+func (gr *GitHubRepo) NumIssues() int { return len(gr.issues) }
+
+// NumComments returns the total number of comments across all issues in this repo.
+func (gr *GitHubRepo) NumComments() int { return gr.numComments }
+
+// NumLabels returns the number of labels defined in this repo.
+func (gr *GitHubRepo) NumLabels() int { return len(gr.labels) }
+
+// NumMilestones returns the number of milestones defined in this repo.
+func (gr *GitHubRepo) NumMilestones() int { return len(gr.milestones) }
+
+// NumProjects returns the number of distinct projects that issues in this repo belong to.
+func (gr *GitHubRepo) NumProjects() int { return len(gr.projects) }
+
+// OpenIssues returns the number of open issues (not PRs) in this repo.
+func (gr *GitHubRepo) OpenIssues() int { return gr.openIssues }
+
+// ClosedIssues returns the number of closed issues (not PRs) in this repo.
+func (gr *GitHubRepo) ClosedIssues() int { return gr.closedIssues }
+
+// OpenPRs returns the number of open pull requests in this repo.
+func (gr *GitHubRepo) OpenPRs() int { return gr.openPRs }
+
+// ClosedPRs returns the number of closed (or merged) pull requests in this repo.
+func (gr *GitHubRepo) ClosedPRs() int { return gr.closedPRs }
 
 // ForeachLabel calls fn for each label in the repo, in unsorted order.
 //
@@ -320,6 +369,11 @@ type GitHubIssue struct {
 	reactions           map[int64]*GitHubReaction   // by reaction.ID, on the issue body
 	reactionsSyncedAsOf time.Time                   // as of server's Date header
 	prDetailsSyncedAsOf time.Time                   // as of server's Date header
+
+	projectItems            map[string]*GitHubIssueProjectItem // project node ID -> item
+	projectEvents           map[string]*GitHubProjectEvent     // event node ID -> event
+	projectsSyncedAsOf      time.Time
+	projectEventsSyncedAsOf time.Time
 }
 
 // IsPullRequest reports whether the issue is a pull request.
@@ -347,6 +401,103 @@ type GitHubPullRequestBranch struct {
 	Hash  GitHash // commit SHA
 	Owner string  // repo owner (may differ from issue owner for fork PRs)
 	Repo  string  // repo name
+}
+
+// GitHubProject represents a GitHub Projects v2 project.
+type GitHubProject struct {
+	NodeID        string // "PVT_xxx"
+	Number        int64
+	Owner         string
+	Title         string
+	Closed        bool
+	StatusOptions map[string]*GitHubProjectStatusOption // option ID -> option
+}
+
+// StatusOptionName returns the display name for a status option ID, or "".
+func (p *GitHubProject) StatusOptionName(optionID string) string {
+	if p == nil || optionID == "" {
+		return ""
+	}
+	if opt := p.StatusOptions[optionID]; opt != nil {
+		return opt.Name
+	}
+	return ""
+}
+
+// GitHubProjectStatusOption is one option in a project's Status field.
+type GitHubProjectStatusOption struct {
+	ID   string
+	Name string
+}
+
+// GitHubIssueProjectItem records an issue's membership in one project.
+type GitHubIssueProjectItem struct {
+	ProjectNodeID  string
+	ItemNodeID     string
+	StatusOptionID string
+	UpdatedAt      time.Time
+}
+
+// GitHubProjectEvent is a project-related timeline event on an issue.
+type GitHubProjectEvent struct {
+	ID             string
+	Type           string // "added", "removed", "status_changed"
+	Actor          *GitHubUser
+	Created        time.Time
+	ProjectNodeID  string
+	WasAutomated   bool
+	PreviousStatus string // for "status_changed"
+	Status         string // for "status_changed"
+}
+
+// ProjectStatusName returns the display name of this issue's status in the
+// given project, or "" if the issue is not in the project or has no status.
+func (gi *GitHubIssue) ProjectStatusName(proj *GitHubProject) string {
+	if gi == nil || proj == nil {
+		return ""
+	}
+	item := gi.projectItems[proj.NodeID]
+	if item == nil || item.StatusOptionID == "" {
+		return ""
+	}
+	return proj.StatusOptionName(item.StatusOptionID)
+}
+
+// InProject reports whether the issue is in the given project.
+func (gi *GitHubIssue) InProject(projectNodeID string) bool {
+	if gi == nil {
+		return false
+	}
+	_, ok := gi.projectItems[projectNodeID]
+	return ok
+}
+
+// ForeachProjectItem calls fn for each project the issue belongs to.
+func (gi *GitHubIssue) ForeachProjectItem(fn func(*GitHubIssueProjectItem) error) error {
+	for _, item := range gi.projectItems {
+		if err := fn(item); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ForeachProjectEvent calls fn for each project-related timeline event
+// on this issue, sorted by Created time.
+func (gi *GitHubIssue) ForeachProjectEvent(fn func(*GitHubProjectEvent) error) error {
+	events := make([]*GitHubProjectEvent, 0, len(gi.projectEvents))
+	for _, ev := range gi.projectEvents {
+		events = append(events, ev)
+	}
+	slices.SortFunc(events, func(a, b *GitHubProjectEvent) int {
+		return a.Created.Compare(b.Created)
+	})
+	for _, ev := range events {
+		if err := fn(ev); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // LastModified reports the most recent time that any known metadata was updated.
@@ -1532,6 +1683,10 @@ func (c *Corpus) processGithubIssueMutation(m *maintpb.GithubIssueMutation) {
 		return
 	}
 
+	// Snapshot state before mutation for counter bookkeeping.
+	wasClosed := gi.Closed
+	wasPR := gi.PullRequest != nil
+
 	// Check Updated before all other fields so they don't update if this
 	// Mutation is stale
 	// (ignoring Created since it *should* never update)
@@ -1631,6 +1786,58 @@ func (c *Corpus) processGithubIssueMutation(m *maintpb.GithubIssueMutation) {
 		}
 	}
 
+	// Update open/closed issue/PR counters based on state changes.
+	isPR := gi.PullRequest != nil
+	isClosed := gi.Closed
+	if !ok {
+		// New issue just added to the map.
+		if isPR {
+			if isClosed {
+				gr.closedPRs++
+			} else {
+				gr.openPRs++
+			}
+		} else {
+			if isClosed {
+				gr.closedIssues++
+			} else {
+				gr.openIssues++
+			}
+		}
+	} else {
+		// Existing issue; adjust if state changed.
+		if wasClosed != isClosed || wasPR != isPR {
+			// Remove old bucket.
+			if wasPR {
+				if wasClosed {
+					gr.closedPRs--
+				} else {
+					gr.openPRs--
+				}
+			} else {
+				if wasClosed {
+					gr.closedIssues--
+				} else {
+					gr.openIssues--
+				}
+			}
+			// Add new bucket.
+			if isPR {
+				if isClosed {
+					gr.closedPRs++
+				} else {
+					gr.openPRs++
+				}
+			} else {
+				if isClosed {
+					gr.closedIssues++
+				} else {
+					gr.openIssues++
+				}
+			}
+		}
+	}
+
 	for _, cmut := range m.Comment {
 		if cmut.Id == 0 {
 			c.logf("Ignoring bogus comment mutation lacking Id: %v", cmut)
@@ -1643,6 +1850,7 @@ func (c *Corpus) processGithubIssueMutation(m *maintpb.GithubIssueMutation) {
 			}
 			gc = &GitHubComment{ID: cmut.Id}
 			gi.comments[gc.ID] = gc
+			gr.numComments++
 		}
 		if cmut.User != nil {
 			gc.User = c.github.getUser(cmut.User)
@@ -1723,6 +1931,100 @@ func (c *Corpus) processGithubIssueMutation(m *maintpb.GithubIssueMutation) {
 	}
 	if m.ReactionStatus != nil && m.ReactionStatus.ServerDate != nil {
 		gi.reactionsSyncedAsOf = m.ReactionStatus.ServerDate.AsTime().UTC()
+	}
+
+	for _, pitem := range m.ProjectItem {
+		if pitem.ProjectNodeId == "" {
+			continue
+		}
+		if gi.projectItems == nil {
+			gi.projectItems = make(map[string]*GitHubIssueProjectItem)
+		}
+		if _, exists := gi.projectItems[pitem.ProjectNodeId]; !exists {
+			c.numProjectItems++
+		}
+		if gr.projects == nil {
+			gr.projects = make(map[string]bool)
+		}
+		gr.projects[pitem.ProjectNodeId] = true
+		item := &GitHubIssueProjectItem{
+			ProjectNodeID:  pitem.ProjectNodeId,
+			ItemNodeID:     pitem.ItemNodeId,
+			StatusOptionID: pitem.StatusOptionId,
+		}
+		if pitem.UpdatedAt != nil {
+			item.UpdatedAt = pitem.UpdatedAt.AsTime()
+		}
+		gi.projectItems[pitem.ProjectNodeId] = item
+	}
+	for _, removedProjID := range m.RemovedProjectItemId {
+		if _, exists := gi.projectItems[removedProjID]; exists {
+			c.numProjectItems--
+		}
+		delete(gi.projectItems, removedProjID)
+	}
+	if m.ProjectStatus != nil && m.ProjectStatus.ServerDate != nil {
+		gi.projectsSyncedAsOf = m.ProjectStatus.ServerDate.AsTime().UTC()
+	}
+
+	for _, pe := range m.ProjectEvent {
+		if pe.Id == "" {
+			continue
+		}
+		if gi.projectEvents == nil {
+			gi.projectEvents = make(map[string]*GitHubProjectEvent)
+		}
+		ev := &GitHubProjectEvent{
+			ID:             pe.Id,
+			Type:           pe.EventType,
+			ProjectNodeID:  pe.ProjectNodeId,
+			WasAutomated:   pe.WasAutomated,
+			PreviousStatus: pe.PreviousStatus,
+			Status:         pe.Status,
+		}
+		if pe.ActorId != 0 {
+			ev.Actor = c.github.getOrCreateUserID(pe.ActorId)
+		}
+		if pe.Created != nil {
+			ev.Created = pe.Created.AsTime()
+		}
+		gi.projectEvents[pe.Id] = ev
+	}
+	if m.ProjectEventStatus != nil && m.ProjectEventStatus.ServerDate != nil {
+		gi.projectEventsSyncedAsOf = m.ProjectEventStatus.ServerDate.AsTime().UTC()
+	}
+}
+
+func (c *Corpus) processGithubProjectMutation(m *maintpb.GithubProjectMutation) {
+	c.initGithub()
+	if c.github.projects == nil {
+		c.github.projects = make(map[string]*GitHubProject)
+	}
+	proj, ok := c.github.projects[m.ProjectNodeId]
+	if !ok {
+		proj = &GitHubProject{
+			NodeID: m.ProjectNodeId,
+			Owner:  m.Owner,
+		}
+		c.github.projects[m.ProjectNodeId] = proj
+	}
+	if m.ProjectNumber != 0 {
+		proj.Number = m.ProjectNumber
+	}
+	if m.Title != "" {
+		proj.Title = m.Title
+	}
+	if b := m.Closed; b != nil {
+		proj.Closed = b.Val
+	}
+	if len(m.StatusOptions) > 0 {
+		proj.StatusOptions = make(map[string]*GitHubProjectStatusOption, len(m.StatusOptions))
+		for _, opt := range m.StatusOptions {
+			proj.StatusOptions[opt.Id] = &GitHubProjectStatusOption{
+				ID:   opt.Id,
+				Name: opt.Name,
+			}
+		}
 	}
 }
 
@@ -1884,6 +2186,10 @@ func (p *githubRepoPoller) logf(format string, args ...any) {
 }
 
 func (p *githubRepoPoller) sync(ctx context.Context, expectChanges bool) error {
+	if f := p.c.SyncStatusFunc; f != nil {
+		f(p.Owner(), p.Repo(), true)
+		defer f(p.Owner(), p.Repo(), false)
+	}
 	p.logf("Beginning sync.")
 	f := p.filter()
 	if f.Issues {
@@ -4197,3 +4503,483 @@ func canRetry(ctx context.Context, err error) bool {
 	}
 	return false
 }
+
+// AddProject ensures that a project with the given metadata exists in the
+// corpus, emitting a GithubProjectMutation if needed. This is used by the
+// backfill to register all org projects, including those with no items in
+// tracked repos.
+func (c *Corpus) AddProject(owner, nodeID string, number int64, title string, closed bool) {
+	c.mu.RLock()
+	existing := c.github.projects[nodeID]
+	c.mu.RUnlock()
+
+	if existing != nil && existing.Title == title && existing.Closed == closed {
+		return // unchanged
+	}
+
+	c.addMutation(&maintpb.Mutation{
+		GithubProject: &maintpb.GithubProjectMutation{
+			Owner:         owner,
+			ProjectNodeId: nodeID,
+			ProjectNumber: number,
+			Title:         title,
+			Closed:        &maintpb.BoolChange{Val: closed},
+		},
+	})
+}
+
+// SyncProjectsForIssue fetches the project membership, status, and timeline
+// events for a single issue via GraphQL, and emits mutations for any changes.
+// The httpClient must be authenticated with GitHub (e.g. via a token source).
+func (c *Corpus) SyncProjectsForIssue(ctx context.Context, httpClient *http.Client, owner, repo string, issueNum int32) error {
+	c.initGithub()
+	gr := c.github.getOrCreateRepo(owner, repo)
+	p := &githubRepoPoller{
+		c:      c,
+		gr:     gr,
+		client: httpClient,
+	}
+	return p.syncProjectsForIssue(ctx, issueNum)
+}
+
+// syncProjectsForIssue fetches the project membership, status, and timeline
+// events for a single issue via GraphQL, and emits mutations for any changes.
+func (p *githubRepoPoller) syncProjectsForIssue(ctx context.Context, issueNum int32) error {
+	owner, repo := p.gr.id.Owner, p.gr.id.Repo
+	p.logf("syncing projects for issue %d", issueNum)
+
+	var result struct {
+		Repository struct {
+			IssueOrPullRequest json.RawMessage `json:"issueOrPullRequest"`
+		} `json:"repository"`
+	}
+	if err := p.graphqlRequest(ctx, projectsForIssueQuery, map[string]any{
+		"owner":  owner,
+		"name":   repo,
+		"number": issueNum,
+	}, &result); err != nil {
+		return fmt.Errorf("syncProjectsForIssue %d: %w", issueNum, err)
+	}
+
+	var issueData projectIssueData
+	if err := json.Unmarshal(result.Repository.IssueOrPullRequest, &issueData); err != nil {
+		return fmt.Errorf("syncProjectsForIssue %d: unmarshal: %w", issueNum, err)
+	}
+
+	p.c.mu.RLock()
+	gi := p.gr.issues[issueNum]
+	p.c.mu.RUnlock()
+	if gi == nil {
+		return nil // issue not in corpus yet
+	}
+
+	var mut maintpb.GithubIssueMutation
+	mut.Owner = owner
+	mut.Repo = repo
+	mut.Number = issueNum
+
+	// Process project items.
+	// Track the max updatedAt across all items we observed (not just changed ones)
+	// to use as the sync high-water mark.
+	var maxItemTime time.Time
+	seenProjects := make(map[string]bool)
+	for _, item := range issueData.ProjectItems.Nodes {
+		proj := item.Project
+		if proj.ID == "" {
+			continue
+		}
+		seenProjects[proj.ID] = true
+		if item.UpdatedAt.After(maxItemTime) {
+			maxItemTime = item.UpdatedAt
+		}
+
+		// Emit project metadata mutation if needed.
+		p.maybeEmitProjectMutation(owner, proj)
+
+		optionID := item.StatusValue.OptionID
+
+		p.c.mu.RLock()
+		existing := gi.projectItems[proj.ID]
+		p.c.mu.RUnlock()
+
+		if existing != nil && existing.ItemNodeID == item.ID && existing.StatusOptionID == optionID {
+			continue // unchanged
+		}
+
+		mut.ProjectItem = append(mut.ProjectItem, &maintpb.GithubIssueProjectItem{
+			ProjectNodeId:  proj.ID,
+			ItemNodeId:     item.ID,
+			StatusOptionId: optionID,
+			UpdatedAt:      timestamppb.New(item.UpdatedAt),
+		})
+	}
+
+	// Detect removals.
+	p.c.mu.RLock()
+	for projID := range gi.projectItems {
+		if !seenProjects[projID] {
+			mut.RemovedProjectItemId = append(mut.RemovedProjectItemId, projID)
+		}
+	}
+	p.c.mu.RUnlock()
+
+	// Process timeline events.
+	// Track the max createdAt across all events we observed.
+	var maxEventTime time.Time
+	for _, ev := range issueData.TimelineItems.Nodes {
+		if ev.ID == "" {
+			continue
+		}
+		if ev.CreatedAt.After(maxEventTime) {
+			maxEventTime = ev.CreatedAt
+		}
+
+		p.c.mu.RLock()
+		_, exists := gi.projectEvents[ev.ID]
+		p.c.mu.RUnlock()
+		if exists {
+			continue
+		}
+
+		pe := &maintpb.GithubProjectEvent{
+			Id:           ev.ID,
+			EventType:    ev.TypeName.eventType(),
+			WasAutomated: ev.WasAutomated,
+		}
+		if ev.Actor.DatabaseID != 0 {
+			pe.ActorId = ev.Actor.DatabaseID
+		}
+		if !ev.CreatedAt.IsZero() {
+			pe.Created = timestamppb.New(ev.CreatedAt)
+		}
+		if ev.Project.ID != "" {
+			pe.ProjectNodeId = ev.Project.ID
+		}
+		pe.PreviousStatus = ev.PreviousStatus
+		pe.Status = ev.Status
+		mut.ProjectEvent = append(mut.ProjectEvent, pe)
+	}
+
+	if len(mut.ProjectItem) == 0 && len(mut.RemovedProjectItemId) == 0 && len(mut.ProjectEvent) == 0 {
+		return nil // nothing changed
+	}
+
+	// Use the max observed timestamps as high-water marks, not time.Now(),
+	// to avoid advancing past events that occurred between the API fetch
+	// and this processing.
+	if !maxItemTime.IsZero() {
+		mut.ProjectStatus = &maintpb.GithubIssueSyncStatus{ServerDate: timestamppb.New(maxItemTime)}
+	}
+	if !maxEventTime.IsZero() {
+		mut.ProjectEventStatus = &maintpb.GithubIssueSyncStatus{ServerDate: timestamppb.New(maxEventTime)}
+	}
+
+	p.c.addMutation(&maintpb.Mutation{GithubIssue: &mut})
+	return nil
+}
+
+// maybeEmitProjectMutation emits a GithubProjectMutation if the project
+// metadata (title, status options) differs from what's in the corpus.
+func (p *githubRepoPoller) maybeEmitProjectMutation(owner string, proj gqlProject) {
+	p.c.mu.RLock()
+	existing := p.c.github.projects[proj.ID]
+	p.c.mu.RUnlock()
+
+	needsUpdate := existing == nil || existing.Title != proj.Title || existing.Closed != proj.Closed
+	if !needsUpdate && existing != nil && proj.StatusField.Options != nil {
+		if len(existing.StatusOptions) != len(proj.StatusField.Options) {
+			needsUpdate = true
+		} else {
+			for _, opt := range proj.StatusField.Options {
+				if eo := existing.StatusOptions[opt.ID]; eo == nil || eo.Name != opt.Name {
+					needsUpdate = true
+					break
+				}
+			}
+		}
+	}
+	if !needsUpdate {
+		return
+	}
+
+	pm := &maintpb.GithubProjectMutation{
+		Owner:         owner,
+		ProjectNodeId: proj.ID,
+		ProjectNumber: int64(proj.Number),
+		Title:         proj.Title,
+		Closed:        &maintpb.BoolChange{Val: proj.Closed},
+	}
+	for _, opt := range proj.StatusField.Options {
+		pm.StatusOptions = append(pm.StatusOptions, &maintpb.GithubProjectStatusOption{
+			Id:   opt.ID,
+			Name: opt.Name,
+		})
+	}
+	p.c.addMutation(&maintpb.Mutation{GithubProject: pm})
+}
+
+// GraphQL types for project sync responses.
+
+type projectIssueData struct {
+	ProjectItems struct {
+		Nodes []gqlProjectItem `json:"nodes"`
+	} `json:"projectItems"`
+	TimelineItems struct {
+		Nodes []gqlProjectTimelineEvent `json:"nodes"`
+	} `json:"timelineItems"`
+}
+
+type gqlProjectItem struct {
+	ID          string     `json:"id"`
+	UpdatedAt   time.Time  `json:"updatedAt"`
+	Project     gqlProject `json:"project"`
+	StatusValue struct {
+		OptionID string `json:"optionId"`
+	} `json:"fieldValueByName"`
+}
+
+type gqlProject struct {
+	ID          string `json:"id"`
+	Number      int    `json:"number"`
+	Title       string `json:"title"`
+	Closed      bool   `json:"closed"`
+	StatusField struct {
+		Options []gqlStatusOption `json:"options"`
+	} `json:"field"`
+}
+
+type gqlStatusOption struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+type gqlProjectTimelineEvent struct {
+	ID             string        `json:"id"`
+	TypeName       gqlEventType  `json:"__typename"`
+	CreatedAt      time.Time     `json:"createdAt"`
+	WasAutomated   bool          `json:"wasAutomated"`
+	Actor          gqlActor      `json:"actor"`
+	Project        gqlProjectRef `json:"project"`
+	PreviousStatus string        `json:"previousStatus"`
+	Status         string        `json:"status"`
+}
+
+type gqlEventType string
+
+func (t gqlEventType) eventType() string {
+	switch t {
+	case "AddedToProjectV2Event":
+		return "added"
+	case "RemovedFromProjectV2Event":
+		return "removed"
+	case "ProjectV2ItemStatusChangedEvent":
+		return "status_changed"
+	default:
+		return string(t)
+	}
+}
+
+type gqlActor struct {
+	DatabaseID int64  `json:"databaseId"`
+	Login      string `json:"login"`
+}
+
+type gqlProjectRef struct {
+	ID string `json:"id"`
+}
+
+// projectsForIssueQuery fetches an issue's project memberships and
+// project-related timeline events in a single GraphQL request.
+//
+// projectItems(first: 50) — an issue is rarely in more than a few projects;
+// 50 is well above practical usage. GitHub's max is 100.
+//
+// timelineItems(first: 100) — the max page size GitHub allows. For issues
+// with very long project histories (>100 add/remove/status-change events),
+// we'd need pagination. In practice this is unlikely for Tailscale repos.
+// TODO: add pagination for timelineItems if needed.
+const projectsForIssueQuery = `
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    issueOrPullRequest(number: $number) {
+      ... on Issue {
+        projectItems(first: 50) {
+          nodes {
+            id
+            updatedAt
+            project {
+              id
+              number
+              title
+              closed
+              field(name: "Status") {
+                ... on ProjectV2SingleSelectField {
+                  options { id name }
+                }
+              }
+            }
+            fieldValueByName(name: "Status") {
+              ... on ProjectV2ItemFieldSingleSelectValue {
+                optionId
+              }
+            }
+          }
+        }
+        timelineItems(
+          first: 100
+          itemTypes: [
+            ADDED_TO_PROJECT_V2_EVENT
+            REMOVED_FROM_PROJECT_V2_EVENT
+            PROJECT_V2_ITEM_STATUS_CHANGED_EVENT
+          ]
+        ) {
+          nodes {
+            __typename
+            ... on AddedToProjectV2Event {
+              id
+              createdAt
+              wasAutomated
+              actor { ... on User { databaseId login } }
+              project { id }
+            }
+            ... on RemovedFromProjectV2Event {
+              id
+              createdAt
+              wasAutomated
+              actor { ... on User { databaseId login } }
+              project { id }
+            }
+            ... on ProjectV2ItemStatusChangedEvent {
+              id
+              createdAt
+              wasAutomated
+              actor { ... on User { databaseId login } }
+              project { id }
+              previousStatus
+              status
+            }
+          }
+        }
+      }
+      ... on PullRequest {
+        projectItems(first: 50) {
+          nodes {
+            id
+            updatedAt
+            project {
+              id
+              number
+              title
+              closed
+              field(name: "Status") {
+                ... on ProjectV2SingleSelectField {
+                  options { id name }
+                }
+              }
+            }
+            fieldValueByName(name: "Status") {
+              ... on ProjectV2ItemFieldSingleSelectValue {
+                optionId
+              }
+            }
+          }
+        }
+        timelineItems(
+          first: 100
+          itemTypes: [
+            ADDED_TO_PROJECT_V2_EVENT
+            REMOVED_FROM_PROJECT_V2_EVENT
+            PROJECT_V2_ITEM_STATUS_CHANGED_EVENT
+          ]
+        ) {
+          nodes {
+            __typename
+            ... on AddedToProjectV2Event {
+              id
+              createdAt
+              wasAutomated
+              actor { ... on User { databaseId login } }
+              project { id }
+            }
+            ... on RemovedFromProjectV2Event {
+              id
+              createdAt
+              wasAutomated
+              actor { ... on User { databaseId login } }
+              project { id }
+            }
+            ... on ProjectV2ItemStatusChangedEvent {
+              id
+              createdAt
+              wasAutomated
+              actor { ... on User { databaseId login } }
+              project { id }
+              previousStatus
+              status
+            }
+          }
+        }
+      }
+    }
+  }
+}
+`
+
+// ResolveContentNodeID resolves a GitHub GraphQL node ID (e.g. "I_kwDO...")
+// to an (owner, repo, number) triple. Returns ("", "", 0) if unresolvable.
+// The httpClient must be authenticated with GitHub.
+func (c *Corpus) ResolveContentNodeID(ctx context.Context, httpClient *http.Client, nodeID string) (owner, repo string, number int32, err error) {
+	c.initGithub()
+	// Use any watched repo to create a minimal poller for the GraphQL request.
+	var gr *GitHubRepo
+	for _, r := range c.github.repos {
+		gr = r
+		break
+	}
+	if gr == nil {
+		return "", "", 0, fmt.Errorf("no repos tracked")
+	}
+	p := &githubRepoPoller{c: c, gr: gr, client: httpClient}
+	return p.resolveContentNodeID(ctx, nodeID)
+}
+
+// resolveContentNodeID resolves a GitHub GraphQL node ID (e.g. "I_kwDO...")
+// to an (owner, repo, number) triple. Returns ("", "", 0) if unresolvable.
+func (p *githubRepoPoller) resolveContentNodeID(ctx context.Context, nodeID string) (owner, repo string, number int32, err error) {
+	var result struct {
+		Node struct {
+			Number     int `json:"number"`
+			Repository struct {
+				Owner struct {
+					Login string `json:"login"`
+				} `json:"owner"`
+				Name string `json:"name"`
+			} `json:"repository"`
+		} `json:"node"`
+	}
+	if err := p.graphqlRequest(ctx, resolveNodeQuery, map[string]any{
+		"id": nodeID,
+	}, &result); err != nil {
+		return "", "", 0, err
+	}
+	n := result.Node
+	if n.Number == 0 {
+		return "", "", 0, nil
+	}
+	return n.Repository.Owner.Login, n.Repository.Name, int32(n.Number), nil
+}
+
+const resolveNodeQuery = `
+query($id: ID!) {
+  node(id: $id) {
+    ... on Issue {
+      number
+      repository { owner { login } name }
+    }
+    ... on PullRequest {
+      number
+      repository { owner { login } name }
+    }
+  }
+}
+`

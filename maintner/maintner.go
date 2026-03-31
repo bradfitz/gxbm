@@ -32,6 +32,10 @@ type Corpus struct {
 	// (sync progress, warnings, etc.). If nil, log.Printf is used.
 	Logf func(format string, args ...any)
 
+	// SyncStatusFunc, if non-nil, is called when a GitHub repo sync
+	// starts (syncing=true) or finishes (syncing=false).
+	SyncStatusFunc func(owner, repo string, syncing bool)
+
 	mutationLogger       MutationLogger // non-nil when this is a self-updating corpus
 	mutationSource       MutationSource // from Initialize
 	verbose              bool
@@ -48,6 +52,9 @@ type Corpus struct {
 	// pubsub:
 	activityChans map[string]chan struct{} // keyed by topic
 
+	// Counters maintained during mutation processing.
+	numProjectItems int // total project item memberships across all issues
+
 	// github-specific
 	github              *GitHub
 	gerrit              *Gerrit
@@ -57,7 +64,8 @@ type Corpus struct {
 	githubBaseTransport http.RoundTripper
 
 	// git-specific:
-	lastGitCount          time.Time // last time of log spam about loading status
+	gitCommitCount        map[string]int // repo name -> commit count
+	lastGitCount          time.Time      // last time of log spam about loading status
 	pollGitDirs           []polledGitCommits
 	watchedGitRepoConfigs []watchedGitRepoState
 	gitPeople             map[string]*GitPerson
@@ -510,6 +518,9 @@ func (c *Corpus) processMutationLocked(m *maintpb.Mutation) {
 	if am := m.GithubActions; am != nil {
 		c.processGithubActionsMutation(am)
 	}
+	if pm := m.GithubProject; pm != nil {
+		c.processGithubProjectMutation(pm)
+	}
 }
 
 // finishProcessing fixes up invariants and data structures before
@@ -622,6 +633,35 @@ func (c *Corpus) GitRepos() []string {
 	}
 	return repos
 }
+
+// NumProjectItems returns the total number of project item memberships
+// (issue-in-project associations) across all issues.
+func (c *Corpus) NumProjectItems() int { return c.numProjectItems }
+
+// GitRepoCommitCount returns the number of git commits for a given repo name.
+func (c *Corpus) GitRepoCommitCount(repoName string) int {
+	return c.gitCommitCount[repoName]
+}
+
+// GitRepoRefCount returns the number of refs for a given repo name.
+func (c *Corpus) GitRepoRefCount(repoName string) int {
+	return len(c.gitRefs[repoName])
+}
+
+// NumGitCommits returns the number of git commits in the corpus.
+func (c *Corpus) NumGitCommits() int { return len(c.gitCommit) }
+
+// NumGitRefs returns the total number of git refs across all repos.
+func (c *Corpus) NumGitRefs() int {
+	n := 0
+	for _, refs := range c.gitRefs {
+		n += len(refs)
+	}
+	return n
+}
+
+// NumGitTags returns the number of annotated git tags in the corpus.
+func (c *Corpus) NumGitTags() int { return len(c.gitTags) }
 
 // GitRef returns the commit hash for a given repo and ref name, or
 // the zero GitHash if not known.

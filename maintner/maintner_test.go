@@ -94,6 +94,7 @@ func singleIssueGitHubCorpus() *Corpus {
 					Assignees: nil,
 				},
 			},
+			openIssues: 1,
 		},
 	}
 	return c

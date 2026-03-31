@@ -41,6 +41,13 @@ func (c *Corpus) fire(topic string) {
 	}
 }
 
+// PokeGitHubRepo wakes up the sync loop for the given GitHub repo,
+// causing it to re-poll immediately with expectChanges set. This is
+// used by external webhook handlers to notify the corpus of changes.
+func (c *Corpus) PokeGitHubRepo(owner, repo string) {
+	c.fire("github:" + owner + "/" + repo)
+}
+
 // StartPubSubHelperSubscribe starts subscribing to a
 // golang.org/x/build/cmd/pubsubhelper server, such
 // as https://pubsubhelper.golang.org

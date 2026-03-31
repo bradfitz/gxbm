@@ -425,6 +425,12 @@ func (c *Corpus) processGitMutation(m *maintpb.GitMutation) {
 		}
 		if gc.Repo == "" && repoName != "" {
 			gc.Repo = repoName
+			// Count newly-assigned commits. Placeholders have no Repo,
+			// so this only fires once per real commit.
+			if c.gitCommitCount == nil {
+				c.gitCommitCount = make(map[string]int)
+			}
+			c.gitCommitCount[repoName]++
 		}
 	}
 

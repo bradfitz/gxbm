@@ -15,6 +15,7 @@ message Mutation {
   GithubIssueMutation github_issue = 1; // issue-specific changes
   GithubMutation github = 3; // labels, milestones (not issue-specific)
   GithubActionsMutation github_actions = 5; // workflow runs and jobs
+  GithubProjectMutation github_project = 6; // org-level project metadata
 
   GitMutation git = 2;
   GerritMutation gerrit = 4;
@@ -100,7 +101,14 @@ message GithubIssueMutation {
   GithubPullRequestBranch base = 41;   // target branch
   GithubIssueSyncStatus pr_detail_status = 42;  // sync cursor for PR detail fetch
 
-  // Next tag: 43
+  // Project membership and status.
+  repeated GithubIssueProjectItem project_item = 43;     // add/update project items
+  repeated string removed_project_item_id = 44;          // project node IDs to remove
+  GithubIssueSyncStatus project_status = 45;              // sync cursor for project items
+  repeated GithubProjectEvent project_event = 46;         // project timeline events to add
+  GithubIssueSyncStatus project_event_status = 47;        // sync cursor for project events
+
+  // Next tag: 48
 }
 
 // BoolChange represents a change to a boolean value.
@@ -360,6 +368,46 @@ message GitRef {
   // hash is the lowercase hex object hash.
   // Typically 40 hex bytes (SHA-1) but may be longer for SHA-256 repos.
   string hash = 2;
+}
+
+// GithubProjectMutation records org-level project metadata (title, status
+// field options). Emitted on first discovery and whenever metadata changes.
+message GithubProjectMutation {
+  string owner = 1;                                        // "tailscale"
+  string project_node_id = 2;                              // "PVT_xxx"
+  int64  project_number = 3;                               // project number within org
+  string title = 4;
+  repeated GithubProjectStatusOption status_options = 5;   // full set of status options
+  BoolChange closed = 6;                                   // whether the project is closed
+}
+
+// GithubProjectStatusOption is one option in a project's Status field.
+message GithubProjectStatusOption {
+  string id = 1;     // GraphQL option ID
+  string name = 2;   // "Todo", "In Progress", "Done", etc.
+}
+
+// GithubIssueProjectItem records an issue's membership in one project,
+// with its current Status field value.
+message GithubIssueProjectItem {
+  string project_node_id = 1;   // "PVT_xxx" - which project
+  string item_node_id = 2;      // "PVTI_xxx" - the project item ID
+  string status_option_id = 3;  // ID of the status option, or "" for none
+  google.protobuf.Timestamp updated_at = 4;  // item's updatedAt from GraphQL
+}
+
+// GithubProjectEvent is a project-related timeline event on an issue
+// (added to project, removed from project, or status changed).
+message GithubProjectEvent {
+  string id = 1;                              // GraphQL node ID
+  string event_type = 2;                      // "added", "removed", "status_changed"
+  int64 actor_id = 3;
+  google.protobuf.Timestamp created = 4;
+  string project_node_id = 5;                 // which project
+  bool was_automated = 6;
+  // For "status_changed" events only:
+  string previous_status = 7;                 // display name of previous status
+  string status = 8;                          // display name of new status
 }
 
 // GithubActionsMutation records a GitHub Actions workflow run or job.

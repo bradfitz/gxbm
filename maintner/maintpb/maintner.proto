@@ -108,7 +108,11 @@ message GithubIssueMutation {
   repeated GithubProjectEvent project_event = 46;         // project timeline events to add
   GithubIssueSyncStatus project_event_status = 47;        // sync cursor for project events
 
-  // Next tag: 48
+  // issue_type is the native GitHub issue type name (e.g. "Bug", "Feature").
+  // Empty for pull requests or issues with no type set.
+  string issue_type = 48;
+
+  // Next tag: 49
 }
 
 // BoolChange represents a change to a boolean value.
@@ -377,8 +381,9 @@ message GithubProjectMutation {
   string project_node_id = 2;                              // "PVT_xxx"
   int64  project_number = 3;                               // project number within org
   string title = 4;
-  repeated GithubProjectStatusOption status_options = 5;   // full set of status options
+  repeated GithubProjectStatusOption status_options = 5;   // full set of Status options (kept for backward compat)
   BoolChange closed = 6;                                   // whether the project is closed
+  repeated GithubProjectSingleSelectField single_select_fields = 7; // all single-select fields
 }
 
 // GithubProjectStatusOption is one option in a project's Status field.
@@ -387,13 +392,28 @@ message GithubProjectStatusOption {
   string name = 2;   // "Todo", "In Progress", "Done", etc.
 }
 
+// GithubProjectSingleSelectField records the schema of one single-select
+// field belonging to a project (e.g. "Status", "Pod", "Priority").
+message GithubProjectSingleSelectField {
+  string name = 1;
+  repeated GithubProjectStatusOption options = 2;
+}
+
 // GithubIssueProjectItem records an issue's membership in one project,
 // with its current Status field value.
 message GithubIssueProjectItem {
   string project_node_id = 1;   // "PVT_xxx" - which project
   string item_node_id = 2;      // "PVTI_xxx" - the project item ID
-  string status_option_id = 3;  // ID of the status option, or "" for none
+  string status_option_id = 3;  // ID of the Status option, or "" for none (kept for backward compat)
   google.protobuf.Timestamp updated_at = 4;  // item's updatedAt from GraphQL
+  repeated GithubProjectItemFieldValue field_values = 5; // all single-select field values
+}
+
+// GithubProjectItemFieldValue records the selected option for one
+// single-select field on a project item.
+message GithubProjectItemFieldValue {
+  string field_name = 1;  // e.g. "Status", "Pod", "Priority"
+  string option_id  = 2;  // selected option ID
 }
 
 // GithubProjectEvent is a project-related timeline event on an issue

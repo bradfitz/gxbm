@@ -1863,3 +1863,459 @@ func TestProjectStatusName(t *testing.T) {
 		t.Errorf("ProjectStatusName(nil) = %q, want empty", got)
 	}
 }
+
+func TestProcessMutation_SingleSelectFields(t *testing.T) {
+	c := new(Corpus)
+
+	// Emit project with Status and Pod single-select fields.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubProject: &maintpb.GithubProjectMutation{
+			Owner:         "tailscale",
+			ProjectNodeId: "PVT_abc",
+			ProjectNumber: 127,
+			Title:         "Backlog",
+			SingleSelectFields: []*maintpb.GithubProjectSingleSelectField{
+				{
+					Name: "Status",
+					Options: []*maintpb.GithubProjectStatusOption{
+						{Id: "s1", Name: "Todo"},
+						{Id: "s2", Name: "In Progress"},
+						{Id: "s3", Name: "Done"},
+					},
+				},
+				{
+					Name: "Pod",
+					Options: []*maintpb.GithubProjectStatusOption{
+						{Id: "p1", Name: "Network"},
+						{Id: "p2", Name: "Platform"},
+					},
+				},
+			},
+		},
+	})
+
+	proj := c.github.projects["PVT_abc"]
+	if proj == nil {
+		t.Fatal("project not created")
+	}
+	if len(proj.Fields) != 2 {
+		t.Fatalf("Fields len = %d, want 2", len(proj.Fields))
+	}
+
+	status := proj.Fields["Status"]
+	if status == nil {
+		t.Fatal("Status field not found")
+	}
+	if len(status.Options) != 3 {
+		t.Fatalf("Status options len = %d, want 3", len(status.Options))
+	}
+	if status.Options["s2"].Name != "In Progress" {
+		t.Errorf("Status option s2 = %q, want In Progress", status.Options["s2"].Name)
+	}
+
+	pod := proj.Fields["Pod"]
+	if pod == nil {
+		t.Fatal("Pod field not found")
+	}
+	if len(pod.Options) != 2 {
+		t.Fatalf("Pod options len = %d, want 2", len(pod.Options))
+	}
+	if pod.Options["p1"].Name != "Network" {
+		t.Errorf("Pod option p1 = %q, want Network", pod.Options["p1"].Name)
+	}
+
+	// FieldOptionName on known and unknown IDs.
+	if got := proj.FieldOptionName("Pod", "p2"); got != "Platform" {
+		t.Errorf("FieldOptionName(Pod, p2) = %q, want Platform", got)
+	}
+	if got := proj.FieldOptionName("Pod", "unknown"); got != "" {
+		t.Errorf("FieldOptionName(Pod, unknown) = %q, want empty", got)
+	}
+	if got := proj.FieldOptionName("NoSuchField", "p1"); got != "" {
+		t.Errorf("FieldOptionName(NoSuchField, p1) = %q, want empty", got)
+	}
+	if got := (*GitHubProject)(nil).FieldOptionName("Status", "s1"); got != "" {
+		t.Errorf("nil.FieldOptionName = %q, want empty", got)
+	}
+}
+
+func TestProcessMutation_FieldValues(t *testing.T) {
+	c := new(Corpus)
+
+	// Create project with two fields.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubProject: &maintpb.GithubProjectMutation{
+			Owner:         "tailscale",
+			ProjectNodeId: "PVT_abc",
+			ProjectNumber: 127,
+			Title:         "Backlog",
+			SingleSelectFields: []*maintpb.GithubProjectSingleSelectField{
+				{
+					Name:    "Status",
+					Options: []*maintpb.GithubProjectStatusOption{{Id: "s1", Name: "In Progress"}},
+				},
+				{
+					Name:    "Pod",
+					Options: []*maintpb.GithubProjectStatusOption{{Id: "p1", Name: "Network"}},
+				},
+			},
+		},
+	})
+
+	// Create issue with field values for both fields.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "tailscale",
+			Repo:   "tailscale",
+			Number: 1,
+			User:   &maintpb.GithubUser{Id: 1},
+			ProjectItem: []*maintpb.GithubIssueProjectItem{
+				{
+					ProjectNodeId:  "PVT_abc",
+					ItemNodeId:     "PVTI_1",
+					StatusOptionId: "s1",
+					FieldValues: []*maintpb.GithubProjectItemFieldValue{
+						{FieldName: "Status", OptionId: "s1"},
+						{FieldName: "Pod", OptionId: "p1"},
+					},
+				},
+			},
+		},
+	})
+
+	proj := c.github.projects["PVT_abc"]
+	gi := c.github.repos[GitHubRepoID{"tailscale", "tailscale"}].issues[1]
+
+	item := gi.projectItems["PVT_abc"]
+	if item == nil {
+		t.Fatal("project item not found")
+	}
+	if item.FieldValues["Status"] != "s1" {
+		t.Errorf("FieldValues[Status] = %q, want s1", item.FieldValues["Status"])
+	}
+	if item.FieldValues["Pod"] != "p1" {
+		t.Errorf("FieldValues[Pod] = %q, want p1", item.FieldValues["Pod"])
+	}
+	// StatusOptionID should be set (directly from proto field).
+	if item.StatusOptionID != "s1" {
+		t.Errorf("StatusOptionID = %q, want s1", item.StatusOptionID)
+	}
+
+	// ProjectFieldValue resolves both fields.
+	if got := gi.ProjectFieldValue(proj, "Status"); got != "In Progress" {
+		t.Errorf("ProjectFieldValue(Status) = %q, want In Progress", got)
+	}
+	if got := gi.ProjectFieldValue(proj, "Pod"); got != "Network" {
+		t.Errorf("ProjectFieldValue(Pod) = %q, want Network", got)
+	}
+	if got := gi.ProjectFieldValue(proj, "Priority"); got != "" {
+		t.Errorf("ProjectFieldValue(Priority) = %q, want empty", got)
+	}
+
+	// Nil-safe.
+	if got := (*GitHubIssue)(nil).ProjectFieldValue(proj, "Pod"); got != "" {
+		t.Errorf("nil.ProjectFieldValue = %q, want empty", got)
+	}
+	if got := gi.ProjectFieldValue(nil, "Pod"); got != "" {
+		t.Errorf("ProjectFieldValue(nil proj) = %q, want empty", got)
+	}
+}
+
+// TestProjectFieldValue_BackwardCompat verifies that an old-style project item
+// (StatusOptionId set, no FieldValues) still resolves correctly via
+// ProjectFieldValue for the "Status" field.
+func TestProjectFieldValue_BackwardCompat(t *testing.T) {
+	c := new(Corpus)
+
+	// Old-style project: only StatusOptions (no SingleSelectFields).
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubProject: &maintpb.GithubProjectMutation{
+			Owner:         "tailscale",
+			ProjectNodeId: "PVT_old",
+			ProjectNumber: 1,
+			Title:         "Old Project",
+			StatusOptions: []*maintpb.GithubProjectStatusOption{
+				{Id: "opt1", Name: "Todo"},
+				{Id: "opt2", Name: "Done"},
+			},
+		},
+	})
+
+	// Old-style item: only StatusOptionId, no FieldValues.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "tailscale",
+			Repo:   "tailscale",
+			Number: 2,
+			User:   &maintpb.GithubUser{Id: 1},
+			ProjectItem: []*maintpb.GithubIssueProjectItem{
+				{
+					ProjectNodeId:  "PVT_old",
+					ItemNodeId:     "PVTI_old",
+					StatusOptionId: "opt2",
+					// No FieldValues — old record.
+				},
+			},
+		},
+	})
+
+	proj := c.github.projects["PVT_old"]
+	gi := c.github.repos[GitHubRepoID{"tailscale", "tailscale"}].issues[2]
+
+	// ProjectStatusName (existing helper) still works.
+	if got := gi.ProjectStatusName(proj); got != "Done" {
+		t.Errorf("ProjectStatusName = %q, want Done", got)
+	}
+	// ProjectFieldValue for "Status" falls back to StatusOptionID.
+	if got := gi.ProjectFieldValue(proj, "Status"); got != "Done" {
+		t.Errorf("ProjectFieldValue(Status) backward-compat = %q, want Done", got)
+	}
+}
+
+// TestProjectFieldValue_FieldValuesBackfillsStatus verifies that when only
+// FieldValues is set (no explicit StatusOptionId in proto), the item's
+// StatusOptionID is backfilled from FieldValues["Status"].
+func TestProjectFieldValue_FieldValuesBackfillsStatus(t *testing.T) {
+	c := new(Corpus)
+
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubProject: &maintpb.GithubProjectMutation{
+			Owner:         "tailscale",
+			ProjectNodeId: "PVT_new",
+			ProjectNumber: 2,
+			Title:         "New Project",
+			SingleSelectFields: []*maintpb.GithubProjectSingleSelectField{
+				{
+					Name:    "Status",
+					Options: []*maintpb.GithubProjectStatusOption{{Id: "s9", Name: "Blocked"}},
+				},
+			},
+		},
+	})
+
+	// New-style item: StatusOptionId is empty, value comes only via FieldValues.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "tailscale",
+			Repo:   "tailscale",
+			Number: 3,
+			User:   &maintpb.GithubUser{Id: 1},
+			ProjectItem: []*maintpb.GithubIssueProjectItem{
+				{
+					ProjectNodeId: "PVT_new",
+					ItemNodeId:    "PVTI_new",
+					// StatusOptionId intentionally omitted.
+					FieldValues: []*maintpb.GithubProjectItemFieldValue{
+						{FieldName: "Status", OptionId: "s9"},
+					},
+				},
+			},
+		},
+	})
+
+	proj := c.github.projects["PVT_new"]
+	gi := c.github.repos[GitHubRepoID{"tailscale", "tailscale"}].issues[3]
+	item := gi.projectItems["PVT_new"]
+
+	// StatusOptionID should be backfilled.
+	if item.StatusOptionID != "s9" {
+		t.Errorf("StatusOptionID = %q, want s9 (backfilled from FieldValues)", item.StatusOptionID)
+	}
+	if got := gi.ProjectFieldValue(proj, "Status"); got != "Blocked" {
+		t.Errorf("ProjectFieldValue(Status) = %q, want Blocked", got)
+	}
+}
+
+func TestProcessMutation_IssueType(t *testing.T) {
+	c := new(Corpus)
+
+	// Create issue without a type.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "tailscale",
+			Repo:   "tailscale",
+			Number: 10,
+			User:   &maintpb.GithubUser{Id: 1},
+		},
+	})
+
+	gi := c.github.repos[GitHubRepoID{"tailscale", "tailscale"}].issues[10]
+	if gi.IssueType != "" {
+		t.Errorf("IssueType = %q, want empty before any type mutation", gi.IssueType)
+	}
+
+	// Set the issue type.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:     "tailscale",
+			Repo:      "tailscale",
+			Number:    10,
+			IssueType: "Bug",
+		},
+	})
+	if gi.IssueType != "Bug" {
+		t.Errorf("IssueType = %q, want Bug", gi.IssueType)
+	}
+
+	// Update to a different type.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:     "tailscale",
+			Repo:      "tailscale",
+			Number:    10,
+			IssueType: "Feature",
+		},
+	})
+	if gi.IssueType != "Feature" {
+		t.Errorf("IssueType = %q, want Feature after update", gi.IssueType)
+	}
+
+	// Empty string in proto must not overwrite existing value (old records).
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:     "tailscale",
+			Repo:      "tailscale",
+			Number:    10,
+			IssueType: "",
+		},
+	})
+	if gi.IssueType != "Feature" {
+		t.Errorf("IssueType = %q, want Feature (empty proto should not overwrite)", gi.IssueType)
+	}
+}
+
+// TestSyncProjectsForIssue is an integration test that calls the real GitHub
+// GraphQL API and verifies that FieldValues and IssueType are populated in the
+// corpus after a sync.
+//
+// It requires a GitHub personal access token (read:project + repo scopes) in
+// the GITHUB_TOKEN environment variable. The issue to sync is configured via:
+//
+//	MAINTNER_TEST_OWNER  (default: tailscale)
+//	MAINTNER_TEST_REPO   (default: tailscale)
+//	MAINTNER_TEST_ISSUE  (required — no default; supply a number for an issue
+//	                      that belongs to a GitHub Projects V2 project)
+//
+// Example:
+//
+//	GITHUB_TOKEN=ghp_... MAINTNER_TEST_ISSUE=12345 \
+//	  go test ./maintner/ -run TestSyncProjectsForIssue -v
+func TestSyncProjectsForIssue(t *testing.T) {
+	token := os.Getenv("GITHUB_TOKEN")
+	if token == "" {
+		t.Skip("GITHUB_TOKEN not set")
+	}
+	issueStr := os.Getenv("MAINTNER_TEST_ISSUE")
+	if issueStr == "" {
+		t.Skip("MAINTNER_TEST_ISSUE not set (set to an issue number that belongs to a GitHub project)")
+	}
+	var issueNum int
+	if _, err := fmt.Sscan(issueStr, &issueNum); err != nil || issueNum <= 0 {
+		t.Fatalf("MAINTNER_TEST_ISSUE=%q: must be a positive integer", issueStr)
+	}
+
+	owner := os.Getenv("MAINTNER_TEST_OWNER")
+	if owner == "" {
+		owner = "tailscale"
+	}
+	repo := os.Getenv("MAINTNER_TEST_REPO")
+	if repo == "" {
+		repo = "tailscale"
+	}
+
+	hc := oauth2.NewClient(context.Background(),
+		oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token}))
+
+	c := new(Corpus)
+
+	// Pre-seed the issue so syncProjectsForIssue doesn't bail out early.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  owner,
+			Repo:   repo,
+			Number: int32(issueNum),
+			User:   &maintpb.GithubUser{Id: 1},
+		},
+	})
+
+	ctx := context.Background()
+	if err := c.SyncProjectsForIssue(ctx, hc, owner, repo, int32(issueNum)); err != nil {
+		t.Fatalf("SyncProjectsForIssue: %v", err)
+	}
+
+	gr := c.github.repos[GitHubRepoID{owner, repo}]
+	if gr == nil {
+		t.Fatal("repo not in corpus after sync")
+	}
+	gi := gr.issues[int32(issueNum)]
+	if gi == nil {
+		t.Fatal("issue not in corpus after sync")
+	}
+
+	t.Logf("IssueType: %q", gi.IssueType)
+	t.Logf("project items: %d", len(gi.projectItems))
+	for projID, item := range gi.projectItems {
+		t.Logf("  project %s: item=%s status=%s fieldValues=%v",
+			projID, item.ItemNodeID, item.StatusOptionID, item.FieldValues)
+	}
+
+	// Verify project metadata (Fields) was populated for any projects seen.
+	for projID := range gi.projectItems {
+		proj := c.github.projects[projID]
+		if proj == nil {
+			t.Errorf("project %s has no metadata in corpus", projID)
+			continue
+		}
+		t.Logf("  project %s title=%q fields=%v", projID, proj.Title, func() []string {
+			var names []string
+			for n := range proj.Fields {
+				names = append(names, n)
+			}
+			return names
+		}())
+
+		item := gi.projectItems[projID]
+		// Every FieldValue entry must resolve to a non-empty name via FieldOptionName.
+		for fieldName, optionID := range item.FieldValues {
+			name := proj.FieldOptionName(fieldName, optionID)
+			if name == "" {
+				t.Errorf("project %s field %q option %q: FieldOptionName returned empty (option not in project schema)",
+					projID, fieldName, optionID)
+			} else {
+				t.Logf("    %s = %s (optionID=%s)", fieldName, name, optionID)
+			}
+		}
+
+		// ProjectFieldValue must agree with FieldOptionName for every field.
+		for fieldName := range item.FieldValues {
+			want := proj.FieldOptionName(fieldName, item.FieldValues[fieldName])
+			got := gi.ProjectFieldValue(proj, fieldName)
+			if got != want {
+				t.Errorf("ProjectFieldValue(%q) = %q, want %q", fieldName, got, want)
+			}
+		}
+	}
+
+	// IssueType should only be set for actual issues, not PRs.
+	if gi.IsPullRequest() && gi.IssueType != "" {
+		t.Errorf("IssueType = %q on a pull request; want empty", gi.IssueType)
+	}
+}
+
+func TestFieldOptionName_StatusFallback(t *testing.T) {
+	// Project with only legacy StatusOptions (no Fields populated).
+	proj := &GitHubProject{
+		StatusOptions: map[string]*GitHubProjectStatusOption{
+			"s1": {ID: "s1", Name: "In Progress"},
+		},
+	}
+
+	// FieldOptionName("Status", ...) falls back to StatusOptions.
+	if got := proj.FieldOptionName("Status", "s1"); got != "In Progress" {
+		t.Errorf("FieldOptionName(Status fallback) = %q, want In Progress", got)
+	}
+	// Non-Status field has no fallback.
+	if got := proj.FieldOptionName("Pod", "s1"); got != "" {
+		t.Errorf("FieldOptionName(Pod fallback) = %q, want empty", got)
+	}
+}

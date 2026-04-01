@@ -129,8 +129,9 @@ type GitHubRepo struct {
 	issues       map[int32]*GitHubIssue // num -> issue
 	milestones   map[int64]*GitHubMilestone
 	labels       map[int64]*GitHubLabel
-	workflowRuns map[int64]*GitHubWorkflowRun // run ID -> run
-	numComments  int                          // running total across all issues
+	workflowRuns    map[int64]*GitHubWorkflowRun // run ID -> run
+	numComments     int                          // running total across all issues
+	numWorkflowJobs int                          // running total across all runs
 	projects     map[string]bool              // project node IDs seen via project items
 	openIssues   int
 	closedIssues int
@@ -157,6 +158,12 @@ func (gr *GitHubRepo) NumMilestones() int { return len(gr.milestones) }
 
 // NumProjects returns the number of distinct projects that issues in this repo belong to.
 func (gr *GitHubRepo) NumProjects() int { return len(gr.projects) }
+
+// NumWorkflowRuns returns the number of GitHub Actions workflow runs in this repo.
+func (gr *GitHubRepo) NumWorkflowRuns() int { return len(gr.workflowRuns) }
+
+// NumWorkflowJobs returns the total number of jobs across all workflow runs in this repo.
+func (gr *GitHubRepo) NumWorkflowJobs() int { return gr.numWorkflowJobs }
 
 // OpenIssues returns the number of open issues (not PRs) in this repo.
 func (gr *GitHubRepo) OpenIssues() int { return gr.openIssues }
@@ -2484,6 +2491,7 @@ func (c *Corpus) processGithubActionsMutation(m *maintpb.GithubActionsMutation) 
 		if !ok {
 			job = &GitHubWorkflowJob{ID: jm.Id, RunID: jm.RunId}
 			run.Jobs[jm.Id] = job
+			gr.numWorkflowJobs++
 		}
 		if jm.Name != "" {
 			job.Name = jm.Name
@@ -4546,7 +4554,6 @@ func (c *Corpus) SyncProjectsForIssue(ctx context.Context, httpClient *http.Clie
 // events for a single issue via GraphQL, and emits mutations for any changes.
 func (p *githubRepoPoller) syncProjectsForIssue(ctx context.Context, issueNum int32) error {
 	owner, repo := p.gr.id.Owner, p.gr.id.Repo
-	p.logf("syncing projects for issue %d", issueNum)
 
 	var result struct {
 		Repository struct {

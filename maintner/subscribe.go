@@ -35,9 +35,11 @@ func (c *Corpus) fire(topic string) {
 	ch := c.activityChan(topic)
 	select {
 	case ch <- struct{}{}:
-		log.Printf("Pubsub woke up sync for topic %q", topic)
+		c.logf("Pubsub woke up sync for topic %q", topic)
 	default:
-		log.Printf("Pubsub event on topic %q discarded; already syncing?", topic)
+		// Already syncing or about to sync; the next cycle will
+		// pick up whatever changed. This is normal and frequent
+		// when webhooks arrive during an active sync.
 	}
 }
 

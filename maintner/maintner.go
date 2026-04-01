@@ -53,6 +53,7 @@ type Corpus struct {
 	activityChans map[string]chan struct{} // keyed by topic
 
 	// Counters maintained during mutation processing.
+	numMutations    int // total mutations processed
 	numProjectItems int // total project item memberships across all issues
 
 	// github-specific
@@ -503,6 +504,7 @@ func (c *Corpus) addMutation(m *maintpb.Mutation) {
 
 // c.mu must be held.
 func (c *Corpus) processMutationLocked(m *maintpb.Mutation) {
+	c.numMutations++
 	if im := m.GithubIssue; im != nil {
 		c.processGithubIssueMutation(im)
 	}
@@ -633,6 +635,9 @@ func (c *Corpus) GitRepos() []string {
 	}
 	return repos
 }
+
+// NumMutations returns the total number of mutations processed by this corpus.
+func (c *Corpus) NumMutations() int { return c.numMutations }
 
 // NumProjectItems returns the total number of project item memberships
 // (issue-in-project associations) across all issues.

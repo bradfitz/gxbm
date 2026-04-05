@@ -1632,11 +1632,16 @@ func TestProcessMutation_ProjectMetadata(t *testing.T) {
 	if proj.Title != "My Project" {
 		t.Errorf("Title = %q, want My Project", proj.Title)
 	}
-	if len(proj.StatusOptions) != 3 {
-		t.Fatalf("StatusOptions len = %d, want 3", len(proj.StatusOptions))
+	// Old-style StatusOptions should be synthesized into Fields.
+	statusField := proj.Field("Status")
+	if statusField == nil {
+		t.Fatal("Status field not synthesized from old StatusOptions")
 	}
-	if proj.StatusOptionName("opt2") != "In Progress" {
-		t.Errorf("StatusOptionName(opt2) = %q, want In Progress", proj.StatusOptionName("opt2"))
+	if len(statusField.Options) != 3 {
+		t.Fatalf("Status options len = %d, want 3", len(statusField.Options))
+	}
+	if statusField.OptionName("opt2") != "In Progress" {
+		t.Errorf("OptionName(opt2) = %q, want In Progress", statusField.OptionName("opt2"))
 	}
 
 	// Update title.
@@ -1650,10 +1655,9 @@ func TestProcessMutation_ProjectMetadata(t *testing.T) {
 	if proj.Title != "Renamed" {
 		t.Errorf("after update, Title = %q, want Renamed", proj.Title)
 	}
-	// Status options should be cleared (empty list in mutation replaces).
-	// Actually empty list does not replace — only non-empty does.
-	if len(proj.StatusOptions) != 3 {
-		t.Errorf("StatusOptions should be unchanged, got %d", len(proj.StatusOptions))
+	// Fields should be unchanged (empty list in mutation does not replace).
+	if len(proj.Field("Status").Options) != 3 {
+		t.Errorf("Status options should be unchanged, got %d", len(proj.Field("Status").Options))
 	}
 }
 
@@ -1698,11 +1702,9 @@ func TestProcessMutation_ProjectItems(t *testing.T) {
 	if item == nil {
 		t.Fatal("project item not found")
 	}
-	if item.ItemNodeID != "PVTI_123" {
-		t.Errorf("ItemNodeID = %q, want PVTI_123", item.ItemNodeID)
-	}
-	if item.StatusOptionID != "opt1" {
-		t.Errorf("StatusOptionID = %q, want opt1", item.StatusOptionID)
+	// Old-style StatusOptionId should be synthesized into fieldValues.
+	if raw := item.fieldValues["Status"]; raw != "opt1" {
+		t.Errorf("Status fieldValue = %q, want opt1", raw)
 	}
 
 	// Update status.
@@ -1721,8 +1723,9 @@ func TestProcessMutation_ProjectItems(t *testing.T) {
 		},
 	})
 
-	if item = gi.projectItems["PVT_abc"]; item.StatusOptionID != "opt2" {
-		t.Errorf("after update, StatusOptionID = %q, want opt2", item.StatusOptionID)
+	item = gi.projectItems["PVT_abc"]
+	if raw := item.fieldValues["Status"]; raw != "opt2" {
+		t.Errorf("after update, Status fieldValue = %q, want opt2", raw)
 	}
 
 	// Remove from project.
@@ -1861,5 +1864,1053 @@ func TestProjectStatusName(t *testing.T) {
 	}
 	if got := gi.ProjectStatusName(nil); got != "" {
 		t.Errorf("ProjectStatusName(nil) = %q, want empty", got)
+	}
+}
+
+func TestProcessMutation_AllFieldTypes(t *testing.T) {
+	c := new(Corpus)
+
+	// Project with all 5 field types.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubProject: &maintpb.GithubProjectMutation{
+			Owner:         "tailscale",
+			ProjectNodeId: "PVT_all",
+			ProjectNumber: 1,
+			Title:         "All Fields",
+			Fields: []*maintpb.GithubProjectField{
+				{
+					Name: "Status",
+					Type: "single_select",
+					Options: []*maintpb.GithubProjectStatusOption{
+						{Id: "s1", Name: "Todo"},
+						{Id: "s2", Name: "Done"},
+					},
+				},
+				{
+					Name: "Sprint",
+					Type: "iteration",
+					Iterations: []*maintpb.GithubProjectIteration{
+						{Id: "it1", Title: "Sprint 1", StartDate: "2026-04-01", Duration: 14},
+						{Id: "it2", Title: "Sprint 2", StartDate: "2026-04-15", Duration: 14},
+					},
+				},
+				{Name: "Notes", Type: "text"},
+				{Name: "Story Points", Type: "number"},
+				{Name: "Due Date", Type: "date"},
+			},
+		},
+	})
+
+	proj := c.github.projects["PVT_all"]
+	if proj == nil {
+		t.Fatal("project not created")
+	}
+	if len(proj.Fields) != 5 {
+		t.Fatalf("Fields len = %d, want 5", len(proj.Fields))
+	}
+
+	// Single-select field.
+	status := proj.Field("Status")
+	if status == nil || status.Type != GitHubProjectFieldSingleSelect {
+		t.Fatal("Status field missing or wrong type")
+	}
+	if len(status.Options) != 2 {
+		t.Fatalf("Status options = %d, want 2", len(status.Options))
+	}
+	if status.OptionName("s1") != "Todo" {
+		t.Errorf("Status.OptionName(s1) = %q, want Todo", status.OptionName("s1"))
+	}
+
+	// Iteration field.
+	sprint := proj.Field("Sprint")
+	if sprint == nil || sprint.Type != GitHubProjectFieldIteration {
+		t.Fatal("Sprint field missing or wrong type")
+	}
+	if len(sprint.Iterations) != 2 {
+		t.Fatalf("Sprint iterations = %d, want 2", len(sprint.Iterations))
+	}
+	it := sprint.Iterations["it1"]
+	if it.Title != "Sprint 1" || it.StartDate != "2026-04-01" || it.Duration != 14 {
+		t.Errorf("Sprint iteration it1 = %+v", it)
+	}
+
+	// Text, Number, Date fields.
+	for _, name := range []string{"Notes", "Story Points", "Due Date"} {
+		f := proj.Field(name)
+		if f == nil {
+			t.Errorf("field %q not found", name)
+		}
+	}
+	if proj.Field("Notes").Type != GitHubProjectFieldText {
+		t.Errorf("Notes type = %q, want text", proj.Field("Notes").Type)
+	}
+	if proj.Field("Story Points").Type != GitHubProjectFieldNumber {
+		t.Errorf("Story Points type = %q, want number", proj.Field("Story Points").Type)
+	}
+	if proj.Field("Due Date").Type != GitHubProjectFieldDate {
+		t.Errorf("Due Date type = %q, want date", proj.Field("Due Date").Type)
+	}
+}
+
+func TestProcessMutation_FieldValues_AllTypes(t *testing.T) {
+	c := new(Corpus)
+
+	// Set up project.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubProject: &maintpb.GithubProjectMutation{
+			Owner:         "tailscale",
+			ProjectNodeId: "PVT_fv",
+			ProjectNumber: 1,
+			Title:         "Test",
+			Fields: []*maintpb.GithubProjectField{
+				{
+					Name: "Status",
+					Type: "single_select",
+					Options: []*maintpb.GithubProjectStatusOption{
+						{Id: "s1", Name: "In Progress"},
+					},
+				},
+				{
+					Name: "Sprint",
+					Type: "iteration",
+					Iterations: []*maintpb.GithubProjectIteration{
+						{Id: "it1", Title: "Sprint 1"},
+					},
+				},
+				{Name: "Notes", Type: "text"},
+				{Name: "Points", Type: "number"},
+				{Name: "Due", Type: "date"},
+			},
+		},
+	})
+
+	points := 3.5
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "tailscale",
+			Repo:   "tailscale",
+			Number: 1,
+			User:   &maintpb.GithubUser{Id: 1},
+			ProjectItem: []*maintpb.GithubIssueProjectItem{
+				{
+					ProjectNodeId: "PVT_fv",
+					ItemNodeId:    "PVTI_1",
+					FieldValues: []*maintpb.GithubProjectItemFieldValue{
+						{FieldName: "Status", Value: &maintpb.GithubProjectItemFieldValue_SingleSelectOptionId{SingleSelectOptionId: "s1"}},
+						{FieldName: "Sprint", Value: &maintpb.GithubProjectItemFieldValue_IterationId{IterationId: "it1"}},
+						{FieldName: "Notes", Value: &maintpb.GithubProjectItemFieldValue_TextValue{TextValue: "hello"}},
+						{FieldName: "Points", Value: &maintpb.GithubProjectItemFieldValue_NumberValue{NumberValue: points}},
+						{FieldName: "Due", Value: &maintpb.GithubProjectItemFieldValue_DateValue{DateValue: "2026-05-01"}},
+					},
+				},
+			},
+		},
+	})
+
+	gi := c.github.repos[GitHubRepoID{"tailscale", "tailscale"}].issues[1]
+	item := gi.projectItems["PVT_fv"]
+	if item == nil {
+		t.Fatal("project item not found")
+	}
+
+	// All values stored as raw strings internally.
+	wantRaw := map[string]projectFieldValue{
+		"Status": "s1",
+		"Sprint": "it1",
+		"Notes":  "hello",
+		"Points": "3.5",
+		"Due":    "2026-05-01",
+	}
+	for name, want := range wantRaw {
+		if got := item.fieldValues[name]; got != want {
+			t.Errorf("fieldValues[%q] = %q, want %q", name, got, want)
+		}
+	}
+
+	// Number zero value is stored as "0" (not empty).
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "tailscale",
+			Repo:   "tailscale",
+			Number: 1,
+			ProjectItem: []*maintpb.GithubIssueProjectItem{
+				{
+					ProjectNodeId: "PVT_fv",
+					ItemNodeId:    "PVTI_1",
+					FieldValues: []*maintpb.GithubProjectItemFieldValue{
+						{FieldName: "Points", Value: &maintpb.GithubProjectItemFieldValue_NumberValue{NumberValue: 0}},
+					},
+				},
+			},
+		},
+	})
+	item = gi.projectItems["PVT_fv"]
+	if got := item.fieldValues["Points"]; got != "0" {
+		t.Errorf("Points zero value: fieldValues = %q, want \"0\"", got)
+	}
+}
+
+func TestProjectFieldValue(t *testing.T) {
+	c := new(Corpus)
+
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubProject: &maintpb.GithubProjectMutation{
+			Owner:         "tailscale",
+			ProjectNodeId: "PVT_pfv",
+			ProjectNumber: 1,
+			Title:         "Test",
+			Fields: []*maintpb.GithubProjectField{
+				{
+					Name: "Status",
+					Type: "single_select",
+					Options: []*maintpb.GithubProjectStatusOption{
+						{Id: "s1", Name: "In Progress"},
+					},
+				},
+			},
+		},
+	})
+
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "tailscale",
+			Repo:   "tailscale",
+			Number: 1,
+			User:   &maintpb.GithubUser{Id: 1},
+			ProjectItem: []*maintpb.GithubIssueProjectItem{
+				{
+					ProjectNodeId: "PVT_pfv",
+					ItemNodeId:    "PVTI_1",
+					FieldValues: []*maintpb.GithubProjectItemFieldValue{
+						{FieldName: "Status", Value: &maintpb.GithubProjectItemFieldValue_SingleSelectOptionId{SingleSelectOptionId: "s1"}},
+					},
+				},
+			},
+		},
+	})
+
+	proj := c.github.projects["PVT_pfv"]
+	gi := c.github.repos[GitHubRepoID{"tailscale", "tailscale"}].issues[1]
+
+	// ProjectFieldValue returns a typed value.
+	fv := gi.ProjectFieldValue(proj, "Status")
+	if !fv.IsSet() || fv.OptionID() != "s1" {
+		t.Errorf("ProjectFieldValue(Status) = %q, want s1", fv.OptionID())
+	}
+	if fv.Type() != GitHubProjectFieldSingleSelect {
+		t.Errorf("ProjectFieldValue(Status).Type() = %q, want single_select", fv.Type())
+	}
+
+	// Unknown field returns zero value.
+	if fv := gi.ProjectFieldValue(proj, "NoSuchField"); fv.IsSet() {
+		t.Errorf("ProjectFieldValue(NoSuchField).IsSet() = true, want false")
+	}
+
+	// Nil-safe.
+	if fv := (*GitHubIssue)(nil).ProjectFieldValue(proj, "Status"); fv.IsSet() {
+		t.Errorf("nil.ProjectFieldValue.IsSet() = true, want false")
+	}
+	if fv := gi.ProjectFieldValue(nil, "Status"); fv.IsSet() {
+		t.Errorf("ProjectFieldValue(nil proj).IsSet() = true, want false")
+	}
+}
+
+// TestProjectStatusName_BackwardCompat verifies that old-style mutations
+// (only StatusOptions/StatusOptionID, no Fields/FieldValues) still work
+// through ProjectStatusName.
+func TestProjectStatusName_BackwardCompat(t *testing.T) {
+	c := new(Corpus)
+
+	// Old-style project: only StatusOptions, no Fields.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubProject: &maintpb.GithubProjectMutation{
+			Owner:         "tailscale",
+			ProjectNodeId: "PVT_old",
+			ProjectNumber: 1,
+			Title:         "Old Project",
+			StatusOptions: []*maintpb.GithubProjectStatusOption{
+				{Id: "opt1", Name: "Todo"},
+				{Id: "opt2", Name: "Done"},
+			},
+		},
+	})
+
+	// Old-style item: only StatusOptionId, no FieldValues.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "tailscale",
+			Repo:   "tailscale",
+			Number: 2,
+			User:   &maintpb.GithubUser{Id: 1},
+			ProjectItem: []*maintpb.GithubIssueProjectItem{
+				{
+					ProjectNodeId:  "PVT_old",
+					ItemNodeId:     "PVTI_old",
+					StatusOptionId: "opt2",
+				},
+			},
+		},
+	})
+
+	proj := c.github.projects["PVT_old"]
+	gi := c.github.repos[GitHubRepoID{"tailscale", "tailscale"}].issues[2]
+
+	if got := gi.ProjectStatusName(proj); got != "Done" {
+		t.Errorf("ProjectStatusName = %q, want Done", got)
+	}
+}
+
+// TestProjectStatusName_NewStyle verifies that new-style mutations
+// (with Fields/FieldValues) work through ProjectStatusName.
+func TestProjectStatusName_NewStyle(t *testing.T) {
+	c := new(Corpus)
+
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubProject: &maintpb.GithubProjectMutation{
+			Owner:         "tailscale",
+			ProjectNodeId: "PVT_new",
+			ProjectNumber: 1,
+			Title:         "New Project",
+			Fields: []*maintpb.GithubProjectField{
+				{
+					Name: "Status",
+					Type: "single_select",
+					Options: []*maintpb.GithubProjectStatusOption{
+						{Id: "s1", Name: "Blocked"},
+					},
+				},
+			},
+		},
+	})
+
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "tailscale",
+			Repo:   "tailscale",
+			Number: 3,
+			User:   &maintpb.GithubUser{Id: 1},
+			ProjectItem: []*maintpb.GithubIssueProjectItem{
+				{
+					ProjectNodeId: "PVT_new",
+					ItemNodeId:    "PVTI_new",
+					FieldValues: []*maintpb.GithubProjectItemFieldValue{
+						{FieldName: "Status", Value: &maintpb.GithubProjectItemFieldValue_SingleSelectOptionId{SingleSelectOptionId: "s1"}},
+					},
+				},
+			},
+		},
+	})
+
+	proj := c.github.projects["PVT_new"]
+	gi := c.github.repos[GitHubRepoID{"tailscale", "tailscale"}].issues[3]
+
+	if got := gi.ProjectStatusName(proj); got != "Blocked" {
+		t.Errorf("ProjectStatusName = %q, want Blocked", got)
+	}
+}
+
+func TestProcessMutation_IssueType(t *testing.T) {
+	c := new(Corpus)
+
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "tailscale",
+			Repo:   "tailscale",
+			Number: 10,
+			User:   &maintpb.GithubUser{Id: 1},
+		},
+	})
+
+	gi := c.github.repos[GitHubRepoID{"tailscale", "tailscale"}].issues[10]
+	if gi.IssueType != "" {
+		t.Errorf("IssueType = %q, want empty", gi.IssueType)
+	}
+
+	// Set type.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:     "tailscale",
+			Repo:      "tailscale",
+			Number:    10,
+			IssueType: "Bug",
+		},
+	})
+	if gi.IssueType != "Bug" {
+		t.Errorf("IssueType = %q, want Bug", gi.IssueType)
+	}
+
+	// Update type.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:     "tailscale",
+			Repo:      "tailscale",
+			Number:    10,
+			IssueType: "Feature",
+		},
+	})
+	if gi.IssueType != "Feature" {
+		t.Errorf("IssueType = %q, want Feature", gi.IssueType)
+	}
+
+	// Empty string should not overwrite (proto3 default).
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "tailscale",
+			Repo:   "tailscale",
+			Number: 10,
+		},
+	})
+	if gi.IssueType != "Feature" {
+		t.Errorf("IssueType = %q, want Feature (should not be cleared)", gi.IssueType)
+	}
+}
+
+func TestFieldValuesChanged(t *testing.T) {
+	existing := &GitHubIssueProjectItem{
+		fieldValues: map[string]projectFieldValue{
+			"Status": "s1",
+			"Points": "3",
+		},
+	}
+
+	// Same values → no change.
+	same := map[string]*maintpb.GithubProjectItemFieldValue{
+		"Status": {FieldName: "Status", Value: &maintpb.GithubProjectItemFieldValue_SingleSelectOptionId{SingleSelectOptionId: "s1"}},
+		"Points": {FieldName: "Points", Value: &maintpb.GithubProjectItemFieldValue_NumberValue{NumberValue: 3}},
+	}
+	if fieldValuesChanged(existing, same) {
+		t.Error("should not report changed for identical values")
+	}
+
+	// Different single-select → changed.
+	diff := map[string]*maintpb.GithubProjectItemFieldValue{
+		"Status": {FieldName: "Status", Value: &maintpb.GithubProjectItemFieldValue_SingleSelectOptionId{SingleSelectOptionId: "s2"}},
+		"Points": {FieldName: "Points", Value: &maintpb.GithubProjectItemFieldValue_NumberValue{NumberValue: 3}},
+	}
+	if !fieldValuesChanged(existing, diff) {
+		t.Error("should report changed for different Status value")
+	}
+
+	// Extra field → changed.
+	extra := map[string]*maintpb.GithubProjectItemFieldValue{
+		"Status": {FieldName: "Status", Value: &maintpb.GithubProjectItemFieldValue_SingleSelectOptionId{SingleSelectOptionId: "s1"}},
+		"Points": {FieldName: "Points", Value: &maintpb.GithubProjectItemFieldValue_NumberValue{NumberValue: 3}},
+		"Notes":  {FieldName: "Notes", Value: &maintpb.GithubProjectItemFieldValue_TextValue{TextValue: "hi"}},
+	}
+	if !fieldValuesChanged(existing, extra) {
+		t.Error("should report changed for extra field")
+	}
+}
+
+// graphqlRoundTripper is a test http.RoundTripper that returns a canned
+// GraphQL response body for any POST to the GitHub GraphQL endpoint.
+type graphqlRoundTripper struct {
+	body []byte
+}
+
+func (rt *graphqlRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: 200,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(bytes.NewReader(rt.body)),
+	}, nil
+}
+
+// TestSyncProjectsForIssue_MockFullFields tests the full sync pipeline with
+// a canned GraphQL response containing all field types populated.
+func TestSyncProjectsForIssue_MockFullFields(t *testing.T) {
+	// Canned response from a real GitHub API call — an issue in the
+	// Eng-Tooling project with Status, Priority, Size (single-select),
+	// Start date, Target date (date), test-string (text),
+	// test-Iteration (iteration), and test-number (number) all populated.
+	const responseJSON = `{
+  "data": {
+    "repository": {
+      "issueOrPullRequest": {
+        "issueType": null,
+        "projectItems": {
+          "nodes": [
+            {
+              "id": "PVTI_lADOAuqoO84BMo0zzgjr1DM",
+              "updatedAt": "2026-04-05T01:49:08Z",
+              "project": {
+                "id": "PVT_kwDOAuqoO84BMo0z",
+                "number": 182,
+                "title": "Eng-Tooling",
+                "closed": false,
+                "fields": {
+                  "nodes": [
+                    {"name": "Title", "dataType": "TITLE"},
+                    {"name": "Assignees", "dataType": "ASSIGNEES"},
+                    {
+                      "name": "Status",
+                      "options": [
+                        {"id": "6ee59bb4", "name": "Epic"},
+                        {"id": "f75ad846", "name": "Backlog"},
+                        {"id": "47fc9ee4", "name": "In progress"},
+                        {"id": "98236657", "name": "Done"}
+                      ]
+                    },
+                    {"name": "Labels", "dataType": "LABELS"},
+                    {"name": "Linked pull requests", "dataType": "LINKED_PULL_REQUESTS"},
+                    {"name": "Milestone", "dataType": "MILESTONE"},
+                    {"name": "Repository", "dataType": "REPOSITORY"},
+                    {"name": "Reviewers", "dataType": "REVIEWERS"},
+                    {"name": "Parent issue", "dataType": "PARENT_ISSUE"},
+                    {"name": "Sub-issues progress", "dataType": "SUB_ISSUES_PROGRESS"},
+                    {
+                      "name": "Priority",
+                      "options": [
+                        {"id": "79628723", "name": "Urgent"},
+                        {"id": "0a877460", "name": "High"},
+                        {"id": "da944a9c", "name": "Medium"},
+                        {"id": "6b329321", "name": "Low"}
+                      ]
+                    },
+                    {
+                      "name": "Size",
+                      "options": [
+                        {"id": "6c6483d2", "name": "XS"},
+                        {"id": "f784b110", "name": "S"},
+                        {"id": "7515a9f1", "name": "M"},
+                        {"id": "817d0097", "name": "L"},
+                        {"id": "db339eb2", "name": "XL"}
+                      ]
+                    },
+                    {"name": "Start date", "dataType": "DATE"},
+                    {"name": "Target date", "dataType": "DATE"},
+                    {"name": "test-string", "dataType": "TEXT"},
+                    {
+                      "name": "test-Iteration",
+                      "configuration": {
+                        "iterations": [
+                          {"id": "2da64e13", "title": "test-Iteration 1", "startDate": "2026-04-06", "duration": 14},
+                          {"id": "340bb15d", "title": "test-Iteration 2", "startDate": "2026-04-20", "duration": 14},
+                          {"id": "a32cade0", "title": "test-Iteration 3", "startDate": "2026-05-04", "duration": 14}
+                        ]
+                      }
+                    },
+                    {"name": "test-number", "dataType": "NUMBER"}
+                  ]
+                }
+              },
+              "fieldValues": {
+                "nodes": [
+                  {},
+                  {},
+                  {"text": "some issue title", "field": {"name": "Title"}},
+                  {"optionId": "6ee59bb4", "field": {"name": "Status"}},
+                  {"optionId": "db339eb2", "field": {"name": "Size"}},
+                  {"date": "2025-04-10", "field": {"name": "Start date"}},
+                  {"optionId": "da944a9c", "field": {"name": "Priority"}},
+                  {"date": "2026-12-25", "field": {"name": "Target date"}},
+                  {"text": "some string", "field": {"name": "test-string"}},
+                  {"iterationId": "340bb15d", "title": "test-Iteration 2", "startDate": "2026-04-20", "duration": 14, "field": {"name": "test-Iteration"}},
+                  {"number": 42.0, "field": {"name": "test-number"}}
+                ]
+              }
+            }
+          ]
+        },
+        "timelineItems": {
+          "nodes": [
+            {
+              "__typename": "AddedToProjectV2Event",
+              "id": "ATPVTE_add1",
+              "createdAt": "2026-01-14T22:29:22Z",
+              "wasAutomated": false,
+              "actor": {"databaseId": 1328629, "login": "swarkentin"},
+              "project": {"id": "PVT_kwDOAuqoO84BMo0z"}
+            },
+            {
+              "__typename": "ProjectV2ItemStatusChangedEvent",
+              "id": "PVTISC_sc1",
+              "createdAt": "2026-01-14T22:29:23Z",
+              "wasAutomated": false,
+              "actor": {},
+              "project": {"id": "PVT_kwDOAuqoO84BMo0z"},
+              "previousStatus": "",
+              "status": "Backlog"
+            },
+            {
+              "__typename": "ProjectV2ItemStatusChangedEvent",
+              "id": "PVTISC_sc2",
+              "createdAt": "2026-03-23T00:46:14Z",
+              "wasAutomated": false,
+              "actor": {"databaseId": 2621, "login": "bradfitz"},
+              "project": {"id": "PVT_kwDOAuqoO84BMo0z"},
+              "previousStatus": "Backlog",
+              "status": "Epic"
+            }
+          ]
+        }
+      }
+    }
+  }
+}`
+
+	hc := &http.Client{Transport: &graphqlRoundTripper{body: []byte(responseJSON)}}
+	c := new(Corpus)
+
+	// Pre-seed the issue.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "tailscale",
+			Repo:   "corp",
+			Number: 100,
+			User:   &maintpb.GithubUser{Id: 1},
+		},
+	})
+
+	if err := c.SyncProjectsForIssue(context.Background(), hc, "tailscale", "corp", 100); err != nil {
+		t.Fatalf("SyncProjectsForIssue: %v", err)
+	}
+
+	// --- Verify project metadata ---
+	proj := c.github.projects["PVT_kwDOAuqoO84BMo0z"]
+	if proj == nil {
+		t.Fatal("project not created")
+	}
+	if proj.Title != "Eng-Tooling" {
+		t.Errorf("project title = %q, want Eng-Tooling", proj.Title)
+	}
+	if proj.Number != 182 {
+		t.Errorf("project number = %d, want 182", proj.Number)
+	}
+
+	// Mirror fields should be filtered out; only custom fields should remain.
+	mirrorFields := []string{"Title", "Assignees", "Labels", "Linked pull requests",
+		"Milestone", "Repository", "Reviewers", "Parent issue", "Sub-issues progress"}
+	for _, name := range mirrorFields {
+		if proj.Field(name) != nil {
+			t.Errorf("mirror field %q should not be in proj.Fields", name)
+		}
+	}
+
+	// Custom fields should be present with correct types.
+	wantFields := map[string]GitHubProjectFieldType{
+		"Status":         GitHubProjectFieldSingleSelect,
+		"Priority":       GitHubProjectFieldSingleSelect,
+		"Size":           GitHubProjectFieldSingleSelect,
+		"Start date":     GitHubProjectFieldDate,
+		"Target date":    GitHubProjectFieldDate,
+		"test-string":    GitHubProjectFieldText,
+		"test-Iteration": GitHubProjectFieldIteration,
+		"test-number":    GitHubProjectFieldNumber,
+	}
+	if len(proj.Fields) != len(wantFields) {
+		t.Errorf("proj.Fields has %d entries, want %d", len(proj.Fields), len(wantFields))
+	}
+	for name, wantType := range wantFields {
+		f := proj.Field(name)
+		if f == nil {
+			t.Errorf("field %q not found", name)
+			continue
+		}
+		if f.Type != wantType {
+			t.Errorf("field %q type = %q, want %q", name, f.Type, wantType)
+		}
+	}
+
+	// Single-select options.
+	if f := proj.Field("Status"); f != nil {
+		if len(f.Options) != 4 {
+			t.Errorf("Status has %d options, want 4", len(f.Options))
+		}
+		if f.OptionName("6ee59bb4") != "Epic" {
+			t.Errorf("Status option 6ee59bb4 = %q, want Epic", f.OptionName("6ee59bb4"))
+		}
+	}
+
+	// Iteration schema.
+	if f := proj.Field("test-Iteration"); f != nil {
+		if len(f.Iterations) != 3 {
+			t.Errorf("test-Iteration has %d iterations, want 3", len(f.Iterations))
+		}
+		it := f.Iterations["340bb15d"]
+		if it == nil || it.Title != "test-Iteration 2" || it.StartDate != "2026-04-20" || it.Duration != 14 {
+			t.Errorf("iteration 340bb15d = %+v", it)
+		}
+	}
+
+	// Status field options should be accessible via Fields.
+	if sf := proj.Field("Status"); sf == nil || len(sf.Options) != 4 {
+		t.Errorf("Status field options count = %v, want 4", sf)
+	}
+
+	// --- Verify issue field values ---
+	gi := c.github.repos[GitHubRepoID{"tailscale", "corp"}].issues[100]
+	item := gi.projectItems["PVT_kwDOAuqoO84BMo0z"]
+	if item == nil {
+		t.Fatal("project item not found")
+	}
+
+	// All field values stored as raw strings.
+	wantRaw := map[string]projectFieldValue{
+		"Status":         "6ee59bb4",
+		"Priority":       "da944a9c",
+		"Size":           "db339eb2",
+		"Start date":     "2025-04-10",
+		"Target date":    "2026-12-25",
+		"test-string":    "some string",
+		"test-Iteration": "340bb15d",
+		"test-number":    "42",
+	}
+	for name, want := range wantRaw {
+		if got := item.fieldValues[name]; got != want {
+			t.Errorf("fieldValues[%q] = %q, want %q", name, got, want)
+		}
+	}
+
+	// Title is a mirror field value; it should NOT appear in fieldValues.
+	if _, ok := item.fieldValues["Title"]; ok {
+		t.Errorf("Title should not be in fieldValues (mirror field)")
+	}
+
+	// issueType was null → should remain empty.
+	if gi.IssueType != "" {
+		t.Errorf("IssueType = %q, want empty (was null in response)", gi.IssueType)
+	}
+
+	// --- Verify timeline events ---
+	if len(gi.projectEvents) != 3 {
+		t.Fatalf("projectEvents = %d, want 3", len(gi.projectEvents))
+	}
+
+	ev := gi.projectEvents["ATPVTE_add1"]
+	if ev == nil || ev.Type != "added" {
+		t.Errorf("add event: got %+v", ev)
+	}
+	if ev != nil && (ev.Actor == nil || ev.Actor.ID != 1328629) {
+		t.Errorf("add event actor: got %+v", ev.Actor)
+	}
+
+	ev = gi.projectEvents["PVTISC_sc1"]
+	if ev == nil || ev.Type != "status_changed" || ev.PreviousStatus != "" || ev.Status != "Backlog" {
+		t.Errorf("status_changed event 1: got %+v", ev)
+	}
+	// Actor was empty {} — should have no actor.
+	if ev != nil && ev.Actor != nil {
+		t.Errorf("status_changed event 1 should have nil actor (was empty {}), got %+v", ev.Actor)
+	}
+
+	ev = gi.projectEvents["PVTISC_sc2"]
+	if ev == nil || ev.PreviousStatus != "Backlog" || ev.Status != "Epic" {
+		t.Errorf("status_changed event 2: got %+v", ev)
+	}
+	if ev != nil && (ev.Actor == nil || ev.Actor.ID != 2621) {
+		t.Errorf("status_changed event 2 actor: got %+v", ev.Actor)
+	}
+}
+
+// TestSyncProjectsForIssue_MockSparseFields tests with an issue in a project
+// where only Status is set and all other custom fields are unset.
+func TestSyncProjectsForIssue_MockSparseFields(t *testing.T) {
+	const responseJSON = `{
+  "data": {
+    "repository": {
+      "issueOrPullRequest": {
+        "issueType": null,
+        "projectItems": {
+          "nodes": [
+            {
+              "id": "PVTI_sparse",
+              "updatedAt": "2026-03-23T00:33:17Z",
+              "project": {
+                "id": "PVT_kwDOAuqoO84BMo0z",
+                "number": 182,
+                "title": "Eng-Tooling",
+                "closed": false,
+                "fields": {
+                  "nodes": [
+                    {"name": "Title", "dataType": "TITLE"},
+                    {"name": "Assignees", "dataType": "ASSIGNEES"},
+                    {
+                      "name": "Status",
+                      "options": [
+                        {"id": "6ee59bb4", "name": "Epic"},
+                        {"id": "f75ad846", "name": "Backlog"}
+                      ]
+                    },
+                    {"name": "Labels", "dataType": "LABELS"},
+                    {
+                      "name": "Priority",
+                      "options": [
+                        {"id": "da944a9c", "name": "Medium"}
+                      ]
+                    },
+                    {"name": "test-string", "dataType": "TEXT"},
+                    {"name": "test-number", "dataType": "NUMBER"},
+                    {"name": "Start date", "dataType": "DATE"},
+                    {
+                      "name": "test-Iteration",
+                      "configuration": {
+                        "iterations": [
+                          {"id": "2da64e13", "title": "test-Iteration 1", "startDate": "2026-04-06", "duration": 14}
+                        ]
+                      }
+                    }
+                  ]
+                }
+              },
+              "fieldValues": {
+                "nodes": [
+                  {},
+                  {},
+                  {"text": "some issue title", "field": {"name": "Title"}},
+                  {"optionId": "6ee59bb4", "field": {"name": "Status"}}
+                ]
+              }
+            }
+          ]
+        },
+        "timelineItems": {
+          "nodes": [
+            {
+              "__typename": "AddedToProjectV2Event",
+              "id": "ATPVTE_sparse1",
+              "createdAt": "2026-03-22T17:33:18Z",
+              "wasAutomated": false,
+              "actor": {},
+              "project": {"id": "PVT_kwDOAuqoO84BMo0z"}
+            }
+          ]
+        }
+      }
+    }
+  }
+}`
+
+	hc := &http.Client{Transport: &graphqlRoundTripper{body: []byte(responseJSON)}}
+	c := new(Corpus)
+
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "tailscale",
+			Repo:   "corp",
+			Number: 200,
+			User:   &maintpb.GithubUser{Id: 1},
+		},
+	})
+
+	if err := c.SyncProjectsForIssue(context.Background(), hc, "tailscale", "corp", 200); err != nil {
+		t.Fatalf("SyncProjectsForIssue: %v", err)
+	}
+
+	gi := c.github.repos[GitHubRepoID{"tailscale", "corp"}].issues[200]
+	item := gi.projectItems["PVT_kwDOAuqoO84BMo0z"]
+	if item == nil {
+		t.Fatal("project item not found")
+	}
+
+	// Only Status should have a value.
+	if raw := item.fieldValues["Status"]; raw != "6ee59bb4" {
+		t.Errorf("Status: got %q, want 6ee59bb4", raw)
+	}
+
+	// All other custom fields should be absent.
+	for _, name := range []string{"Priority", "test-string", "test-number", "Start date", "test-Iteration"} {
+		if _, ok := item.fieldValues[name]; ok {
+			t.Errorf("field %q should not have a value (unset)", name)
+		}
+	}
+
+	// Title (mirror) should not appear.
+	if _, ok := item.fieldValues["Title"]; ok {
+		t.Errorf("Title should not be in fieldValues (mirror field)")
+	}
+
+	// Project fields schema should still be fully populated.
+	proj := c.github.projects["PVT_kwDOAuqoO84BMo0z"]
+	if proj == nil {
+		t.Fatal("project not created")
+	}
+	wantCustomFields := 6 // Status, Priority, test-string, test-number, Start date, test-Iteration
+	if len(proj.Fields) != wantCustomFields {
+		var names []string
+		for n := range proj.Fields {
+			names = append(names, n)
+		}
+		t.Errorf("proj.Fields = %v (%d), want %d custom fields", names, len(proj.Fields), wantCustomFields)
+	}
+
+	// Only 1 timeline event.
+	if len(gi.projectEvents) != 1 {
+		t.Errorf("projectEvents = %d, want 1", len(gi.projectEvents))
+	}
+}
+
+// TestSyncProjectsForIssue_MockNoChange verifies that a second sync with
+// identical data does not emit a new mutation.
+func TestSyncProjectsForIssue_MockNoChange(t *testing.T) {
+	const responseJSON = `{
+  "data": {
+    "repository": {
+      "issueOrPullRequest": {
+        "issueType": null,
+        "projectItems": {
+          "nodes": [
+            {
+              "id": "PVTI_nc",
+              "updatedAt": "2026-04-01T00:00:00Z",
+              "project": {
+                "id": "PVT_nc",
+                "number": 1,
+                "title": "Test",
+                "closed": false,
+                "fields": {
+                  "nodes": [
+                    {
+                      "name": "Status",
+                      "options": [{"id": "s1", "name": "Todo"}]
+                    }
+                  ]
+                }
+              },
+              "fieldValues": {
+                "nodes": [
+                  {"optionId": "s1", "field": {"name": "Status"}}
+                ]
+              }
+            }
+          ]
+        },
+        "timelineItems": {"nodes": []}
+      }
+    }
+  }
+}`
+
+	callCount := 0
+	hc := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		callCount++
+		return &http.Response{
+			StatusCode: 200,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(bytes.NewReader([]byte(responseJSON))),
+		}, nil
+	})}
+
+	c := new(Corpus)
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "test",
+			Repo:   "repo",
+			Number: 1,
+			User:   &maintpb.GithubUser{Id: 1},
+		},
+	})
+
+	ctx := context.Background()
+
+	// First sync — should produce mutations.
+	if err := c.SyncProjectsForIssue(ctx, hc, "test", "repo", 1); err != nil {
+		t.Fatalf("first sync: %v", err)
+	}
+	gi := c.github.repos[GitHubRepoID{"test", "repo"}].issues[1]
+	if item := gi.projectItems["PVT_nc"]; item == nil {
+		t.Fatal("project item not created after first sync")
+	}
+
+	// Count mutations before second sync.
+	projBefore := c.github.projects["PVT_nc"]
+	itemBefore := gi.projectItems["PVT_nc"]
+
+	// Second sync with identical data — should be a no-op.
+	if err := c.SyncProjectsForIssue(ctx, hc, "test", "repo", 1); err != nil {
+		t.Fatalf("second sync: %v", err)
+	}
+
+	// The project and item pointers should be the same objects (no new mutation processed).
+	projAfter := c.github.projects["PVT_nc"]
+	itemAfter := gi.projectItems["PVT_nc"]
+	if projBefore != projAfter {
+		t.Error("project object changed on no-op sync (new mutation was emitted)")
+	}
+	if itemBefore != itemAfter {
+		t.Error("project item object changed on no-op sync (new mutation was emitted)")
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+// TestSyncProjectsForIssue is an integration test that calls the real GitHub
+// GraphQL API and verifies that FieldValues and IssueType are populated in the
+// corpus after a sync.
+//
+// It requires a GitHub personal access token (read:project + repo scopes) in
+// the GITHUB_TOKEN environment variable. The issue to sync is configured via:
+//
+//	MAINTNER_TEST_OWNER  (default: tailscale)
+//	MAINTNER_TEST_REPO   (default: tailscale)
+//	MAINTNER_TEST_ISSUE  (required — no default; supply a number for an issue
+//	                      that belongs to a GitHub Projects V2 project)
+//
+// Example:
+//
+//	GITHUB_TOKEN=ghp_... MAINTNER_TEST_ISSUE=12345 \
+//	  go test ./maintner/ -run TestSyncProjectsForIssue -v
+func TestSyncProjectsForIssue(t *testing.T) {
+	token := os.Getenv("GITHUB_TOKEN")
+	if token == "" {
+		t.Skip("GITHUB_TOKEN not set")
+	}
+	issueStr := os.Getenv("MAINTNER_TEST_ISSUE")
+	if issueStr == "" {
+		t.Skip("MAINTNER_TEST_ISSUE not set")
+	}
+	var issueNum int
+	if _, err := fmt.Sscan(issueStr, &issueNum); err != nil || issueNum <= 0 {
+		t.Fatalf("MAINTNER_TEST_ISSUE=%q: must be a positive integer", issueStr)
+	}
+
+	owner := os.Getenv("MAINTNER_TEST_OWNER")
+	if owner == "" {
+		owner = "tailscale"
+	}
+	repo := os.Getenv("MAINTNER_TEST_REPO")
+	if repo == "" {
+		repo = "tailscale"
+	}
+
+	hc := oauth2.NewClient(context.Background(),
+		oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token}))
+
+	c := new(Corpus)
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  owner,
+			Repo:   repo,
+			Number: int32(issueNum),
+			User:   &maintpb.GithubUser{Id: 1},
+		},
+	})
+
+	ctx := context.Background()
+	if err := c.SyncProjectsForIssue(ctx, hc, owner, repo, int32(issueNum)); err != nil {
+		t.Fatalf("SyncProjectsForIssue: %v", err)
+	}
+
+	gr := c.github.repos[GitHubRepoID{owner, repo}]
+	gi := gr.issues[int32(issueNum)]
+
+	t.Logf("IssueType: %q", gi.IssueType)
+	t.Logf("project items: %d", len(gi.projectItems))
+	for projID, item := range gi.projectItems {
+		proj := c.github.projects[projID]
+		t.Logf("  project %s (%s):", projID, proj.Title)
+		item.ForeachFieldValue(func(fv GitHubProjectFieldValue) error {
+			t.Logf("    %s (type=%s)", fv.Name(), fv.Type())
+			return nil
+		})
+		if proj != nil {
+			for _, f := range proj.Fields {
+				t.Logf("    field schema: %s (type=%s)", f.Name, f.Type)
+			}
+		}
 	}
 }

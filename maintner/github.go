@@ -6,11 +6,13 @@ package maintner
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"iter"
 	"log"
 	"net/http"
 	"net/url"
@@ -53,11 +55,12 @@ func (id GitHubRepoID) valid() bool {
 
 // GitHub holds data about a GitHub repo.
 type GitHub struct {
-	c        *Corpus
-	users    map[int64]*GitHubUser
-	teams    map[int64]*GitHubTeam
-	repos    map[GitHubRepoID]*GitHubRepo
-	projects map[string]*GitHubProject // project node ID ("PVT_xxx") -> project
+	c              *Corpus
+	users          map[int64]*GitHubUser
+	teams          map[int64]*GitHubTeam
+	repos          map[GitHubRepoID]*GitHubRepo
+	projects       map[string]*GitHubProject // project node ID ("PVT_xxx") -> project
+	projectsSorted []*GitHubProject          // kept sorted by owner, then number
 }
 
 // ForeachRepo calls fn serially for each GitHubRepo, stopping if fn
@@ -92,9 +95,10 @@ func (g *GitHub) Project(nodeID string) *GitHubProject {
 	return g.projects[nodeID]
 }
 
-// ForeachProject calls fn for each known project, in unsorted order.
+// ForeachProject calls fn for each known project, sorted by owner
+// then project number.
 func (g *GitHub) ForeachProject(fn func(*GitHubProject) error) error {
-	for _, p := range g.projects {
+	for _, p := range g.projectsSorted {
 		if err := fn(p); err != nil {
 			return err
 		}
@@ -124,19 +128,19 @@ func (g *GitHub) getOrCreateRepo(owner, repo string) *GitHubRepo {
 }
 
 type GitHubRepo struct {
-	github       *GitHub
-	id           GitHubRepoID
-	issues       map[int32]*GitHubIssue // num -> issue
-	milestones   map[int64]*GitHubMilestone
-	labels       map[int64]*GitHubLabel
+	github          *GitHub
+	id              GitHubRepoID
+	issues          map[int32]*GitHubIssue // num -> issue
+	milestones      map[int64]*GitHubMilestone
+	labels          map[int64]*GitHubLabel
 	workflowRuns    map[int64]*GitHubWorkflowRun // run ID -> run
 	numComments     int                          // running total across all issues
 	numWorkflowJobs int                          // running total across all runs
-	projects     map[string]bool              // project node IDs seen via project items
-	openIssues   int
-	closedIssues int
-	openPRs      int
-	closedPRs    int
+	projects        map[string]bool              // project node IDs seen via project items
+	openIssues      int
+	closedIssues    int
+	openPRs         int
+	closedPRs       int
 }
 
 func (gr *GitHubRepo) ID() GitHubRepoID { return gr.id }
@@ -381,6 +385,8 @@ type GitHubIssue struct {
 	projectEvents           map[string]*GitHubProjectEvent     // event node ID -> event
 	projectsSyncedAsOf      time.Time
 	projectEventsSyncedAsOf time.Time
+
+	IssueType string // native GitHub issue type name, e.g. "Bug", "Feature"; "" for PRs or unset
 }
 
 // IsPullRequest reports whether the issue is a pull request.
@@ -412,37 +418,213 @@ type GitHubPullRequestBranch struct {
 
 // GitHubProject represents a GitHub Projects v2 project.
 type GitHubProject struct {
-	NodeID        string // "PVT_xxx"
-	Number        int64
-	Owner         string
-	Title         string
-	Closed        bool
-	StatusOptions map[string]*GitHubProjectStatusOption // option ID -> option
+	NodeID string // "PVT_xxx"
+	Number int64
+	Owner  string
+	Title  string
+	Closed bool
+	// Fields maps field name to field schema for each custom field on the project.
+	// Common field names include "Status" (the default single-select field,
+	// present on all new projects but may be renamed), "Priority", etc.
+	// Mirror fields (Title, Assignees, Labels, Milestone, etc.) are not included.
+	Fields           map[string]*GitHubProjectField
+	sortedFieldNames []string // kept sorted; used by ForeachField and ForeachFieldValue
 }
 
-// StatusOptionName returns the display name for a status option ID, or "".
-func (p *GitHubProject) StatusOptionName(optionID string) string {
-	if p == nil || optionID == "" {
+// Field returns the project field with the given name, or nil.
+// See Fields for common field names.
+func (p *GitHubProject) Field(name string) *GitHubProjectField {
+	if p == nil {
+		return nil
+	}
+	return p.Fields[name]
+}
+
+// ForeachField calls fn for each custom field on the project,
+// sorted by field name.
+func (p *GitHubProject) ForeachField(fn func(*GitHubProjectField) error) error {
+	if p == nil {
+		return nil
+	}
+	for _, name := range p.sortedFieldNames {
+		if f := p.Fields[name]; f != nil {
+			if err := fn(f); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// GitHubProjectFieldOption is one option in a single-select project field.
+type GitHubProjectFieldOption struct {
+	ID   string
+	Name string
+}
+
+// GitHubProjectFieldType is the type of a project custom field.
+type GitHubProjectFieldType string
+
+const (
+	GitHubProjectFieldSingleSelect GitHubProjectFieldType = "single_select"
+	GitHubProjectFieldIteration    GitHubProjectFieldType = "iteration"
+	GitHubProjectFieldText         GitHubProjectFieldType = "text"
+	GitHubProjectFieldNumber       GitHubProjectFieldType = "number"
+	GitHubProjectFieldDate         GitHubProjectFieldType = "date"
+)
+
+// GitHubProjectField is the schema of one custom field on a GitHub Project V2.
+type GitHubProjectField struct {
+	Name       string
+	Type       GitHubProjectFieldType
+	Options    map[string]*GitHubProjectFieldOption // for single_select: option ID -> option
+	Iterations map[string]*GitHubProjectIteration   // for iteration: iteration ID -> iteration
+}
+
+// OptionName returns the display name for an option ID, or "".
+// Only meaningful for single-select fields.
+func (f *GitHubProjectField) OptionName(optionID string) string {
+	if f == nil || optionID == "" {
 		return ""
 	}
-	if opt := p.StatusOptions[optionID]; opt != nil {
+	if opt := f.Options[optionID]; opt != nil {
 		return opt.Name
 	}
 	return ""
 }
 
-// GitHubProjectStatusOption is one option in a project's Status field.
-type GitHubProjectStatusOption struct {
-	ID   string
-	Name string
+// OptionsSorted returns an iterator over the field's single-select options,
+// sorted by option name.
+func (f *GitHubProjectField) OptionsSorted() iter.Seq[*GitHubProjectFieldOption] {
+	return func(yield func(*GitHubProjectFieldOption) bool) {
+		opts := make([]*GitHubProjectFieldOption, 0, len(f.Options))
+		for _, o := range f.Options {
+			opts = append(opts, o)
+		}
+		slices.SortFunc(opts, func(a, b *GitHubProjectFieldOption) int {
+			return cmp.Compare(a.Name, b.Name)
+		})
+		for _, o := range opts {
+			if !yield(o) {
+				return
+			}
+		}
+	}
+}
+
+// IterationsSorted returns an iterator over the field's iterations,
+// sorted by start date.
+func (f *GitHubProjectField) IterationsSorted() iter.Seq[*GitHubProjectIteration] {
+	return func(yield func(*GitHubProjectIteration) bool) {
+		iters := make([]*GitHubProjectIteration, 0, len(f.Iterations))
+		for _, it := range f.Iterations {
+			iters = append(iters, it)
+		}
+		slices.SortFunc(iters, func(a, b *GitHubProjectIteration) int {
+			return cmp.Compare(a.StartDate, b.StartDate)
+		})
+		for _, it := range iters {
+			if !yield(it) {
+				return
+			}
+		}
+	}
+}
+
+// GitHubProjectIteration is one iteration in an iteration project field.
+type GitHubProjectIteration struct {
+	ID        string
+	Title     string
+	StartDate string // "YYYY-MM-DD"
+	Duration  int    // days
+}
+
+// projectFieldValue is the raw string value of a project item field.
+// Its interpretation depends on the field's type (stored on the project schema):
+//   - single_select: the option ID string
+//   - iteration: the iteration ID string
+//   - text: the text string
+//   - number: the float64 formatted with strconv.FormatFloat(..., 'f', -1, 64)
+//   - date: "YYYY-MM-DD"
+type projectFieldValue string
+
+// GitHubProjectFieldValue is a project field's value on an issue.
+// It is a small value type returned by accessors, not stored in maps.
+// The zero value means "not set".
+type GitHubProjectFieldValue struct {
+	field *GitHubProjectField
+	val   projectFieldValue
+}
+
+// Name returns the field name, e.g. "Status", "Priority".
+func (v GitHubProjectFieldValue) Name() string {
+	if v.field == nil {
+		return ""
+	}
+	return v.field.Name
+}
+
+// IsSet reports whether the field value is set.
+func (v GitHubProjectFieldValue) IsSet() bool { return v.field != nil && v.val != "" }
+
+// Type returns the field type.
+func (v GitHubProjectFieldValue) Type() GitHubProjectFieldType {
+	if v.field == nil {
+		return ""
+	}
+	return v.field.Type
+}
+
+// Field returns the field schema.
+func (v GitHubProjectFieldValue) Field() *GitHubProjectField { return v.field }
+
+// OptionID returns the selected option ID. It panics if the field is not single-select.
+func (v GitHubProjectFieldValue) OptionID() string {
+	v.mustType(GitHubProjectFieldSingleSelect)
+	return string(v.val)
+}
+
+// IterationID returns the iteration ID. It panics if the field is not an iteration.
+func (v GitHubProjectFieldValue) IterationID() string {
+	v.mustType(GitHubProjectFieldIteration)
+	return string(v.val)
+}
+
+// Text returns the text value. It panics if the field is not text.
+func (v GitHubProjectFieldValue) Text() string {
+	v.mustType(GitHubProjectFieldText)
+	return string(v.val)
+}
+
+// DateValue returns the date as "YYYY-MM-DD". It panics if the field is not a date.
+func (v GitHubProjectFieldValue) DateValue() string {
+	v.mustType(GitHubProjectFieldDate)
+	return string(v.val)
+}
+
+// Float64 returns the number value. It panics if the field is not a number.
+func (v GitHubProjectFieldValue) Float64() float64 {
+	v.mustType(GitHubProjectFieldNumber)
+	f, _ := strconv.ParseFloat(string(v.val), 64)
+	return f
+}
+
+func (v GitHubProjectFieldValue) mustType(want GitHubProjectFieldType) {
+	if v.field == nil || v.field.Type != want {
+		var got GitHubProjectFieldType
+		if v.field != nil {
+			got = v.field.Type
+		}
+		panic(fmt.Sprintf("GitHubProjectFieldValue: called %s accessor on %s field", want, got))
+	}
 }
 
 // GitHubIssueProjectItem records an issue's membership in one project.
 type GitHubIssueProjectItem struct {
-	ProjectNodeID  string
-	ItemNodeID     string
-	StatusOptionID string
-	UpdatedAt      time.Time
+	Project     *GitHubProject
+	UpdatedAt   time.Time
+	itemNodeID  string                       // only used for sync change detection
+	fieldValues map[string]projectFieldValue // field name -> raw value
 }
 
 // GitHubProjectEvent is a project-related timeline event on an issue.
@@ -460,14 +642,36 @@ type GitHubProjectEvent struct {
 // ProjectStatusName returns the display name of this issue's status in the
 // given project, or "" if the issue is not in the project or has no status.
 func (gi *GitHubIssue) ProjectStatusName(proj *GitHubProject) string {
-	if gi == nil || proj == nil {
+	fv := gi.ProjectFieldValue(proj, "Status")
+	if !fv.IsSet() {
 		return ""
+	}
+	if f := proj.Field("Status"); f != nil {
+		return f.OptionName(fv.OptionID())
+	}
+	return ""
+}
+
+// ProjectFieldValue returns the field value for the named field in the given
+// project. The zero value (where IsSet returns false) means the issue is not
+// in the project or the field has no value.
+func (gi *GitHubIssue) ProjectFieldValue(proj *GitHubProject, fieldName string) GitHubProjectFieldValue {
+	if gi == nil || proj == nil {
+		return GitHubProjectFieldValue{}
 	}
 	item := gi.projectItems[proj.NodeID]
-	if item == nil || item.StatusOptionID == "" {
-		return ""
+	if item == nil {
+		return GitHubProjectFieldValue{}
 	}
-	return proj.StatusOptionName(item.StatusOptionID)
+	raw, ok := item.fieldValues[fieldName]
+	if !ok || raw == "" {
+		return GitHubProjectFieldValue{}
+	}
+	f := proj.Field(fieldName)
+	if f == nil {
+		return GitHubProjectFieldValue{}
+	}
+	return GitHubProjectFieldValue{field: f, val: raw}
 }
 
 // InProject reports whether the issue is in the given project.
@@ -479,10 +683,49 @@ func (gi *GitHubIssue) InProject(projectNodeID string) bool {
 	return ok
 }
 
-// ForeachProjectItem calls fn for each project the issue belongs to.
+// ForeachProjectItem calls fn for each project the issue belongs to,
+// sorted by project title.
 func (gi *GitHubIssue) ForeachProjectItem(fn func(*GitHubIssueProjectItem) error) error {
+	s := make([]*GitHubIssueProjectItem, 0, len(gi.projectItems))
 	for _, item := range gi.projectItems {
+		s = append(s, item)
+	}
+	slices.SortFunc(s, func(a, b *GitHubIssueProjectItem) int {
+		var at, bt string
+		if a.Project != nil {
+			at = a.Project.Title
+		}
+		if b.Project != nil {
+			bt = b.Project.Title
+		}
+		return cmp.Compare(at, bt)
+	})
+	for _, item := range s {
 		if err := fn(item); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// NumFieldValues returns the number of custom field values set on this project item.
+func (pi *GitHubIssueProjectItem) NumFieldValues() int {
+	return len(pi.fieldValues)
+}
+
+// ForeachFieldValue calls fn for each field value on this project item,
+// sorted by field name.
+func (pi *GitHubIssueProjectItem) ForeachFieldValue(fn func(GitHubProjectFieldValue) error) error {
+	for _, name := range pi.Project.sortedFieldNames {
+		raw, ok := pi.fieldValues[name]
+		if !ok {
+			continue
+		}
+		f := pi.Project.Fields[name]
+		if f == nil {
+			continue
+		}
+		if err := fn(GitHubProjectFieldValue{field: f, val: raw}); err != nil {
 			return err
 		}
 	}
@@ -1955,12 +2198,22 @@ func (c *Corpus) processGithubIssueMutation(m *maintpb.GithubIssueMutation) {
 		}
 		gr.projects[pitem.ProjectNodeId] = true
 		item := &GitHubIssueProjectItem{
-			ProjectNodeID:  pitem.ProjectNodeId,
-			ItemNodeID:     pitem.ItemNodeId,
-			StatusOptionID: pitem.StatusOptionId,
+			Project:    c.github.projects[pitem.ProjectNodeId],
+			itemNodeID: pitem.ItemNodeId,
 		}
 		if pitem.UpdatedAt != nil {
 			item.UpdatedAt = pitem.UpdatedAt.AsTime()
+		}
+		if len(pitem.FieldValues) > 0 {
+			item.fieldValues = make(map[string]projectFieldValue, len(pitem.FieldValues))
+			for _, fv := range pitem.FieldValues {
+				item.fieldValues[fv.FieldName] = protoFieldValueString(fv)
+			}
+		} else if pitem.StatusOptionId != "" {
+			// Synthesize from old-style StatusOptionId for old mutation logs.
+			item.fieldValues = map[string]projectFieldValue{
+				"Status": projectFieldValue(pitem.StatusOptionId),
+			}
 		}
 		gi.projectItems[pitem.ProjectNodeId] = item
 	}
@@ -1972,6 +2225,10 @@ func (c *Corpus) processGithubIssueMutation(m *maintpb.GithubIssueMutation) {
 	}
 	if m.ProjectStatus != nil && m.ProjectStatus.ServerDate != nil {
 		gi.projectsSyncedAsOf = m.ProjectStatus.ServerDate.AsTime().UTC()
+	}
+
+	if m.IssueType != "" {
+		gi.IssueType = m.IssueType
 	}
 
 	for _, pe := range m.ProjectEvent {
@@ -2024,14 +2281,61 @@ func (c *Corpus) processGithubProjectMutation(m *maintpb.GithubProjectMutation) 
 	if b := m.Closed; b != nil {
 		proj.Closed = b.Val
 	}
-	if len(m.StatusOptions) > 0 {
-		proj.StatusOptions = make(map[string]*GitHubProjectStatusOption, len(m.StatusOptions))
-		for _, opt := range m.StatusOptions {
-			proj.StatusOptions[opt.Id] = &GitHubProjectStatusOption{
-				ID:   opt.Id,
-				Name: opt.Name,
+	if len(m.Fields) > 0 {
+		proj.Fields = make(map[string]*GitHubProjectField, len(m.Fields))
+		for _, f := range m.Fields {
+			field := &GitHubProjectField{
+				Name: f.Name,
+				Type: GitHubProjectFieldType(f.Type),
 			}
+			if len(f.Options) > 0 {
+				field.Options = make(map[string]*GitHubProjectFieldOption, len(f.Options))
+				for _, o := range f.Options {
+					field.Options[o.Id] = &GitHubProjectFieldOption{ID: o.Id, Name: o.Name}
+				}
+			}
+			if len(f.Iterations) > 0 {
+				field.Iterations = make(map[string]*GitHubProjectIteration, len(f.Iterations))
+				for _, it := range f.Iterations {
+					field.Iterations[it.Id] = &GitHubProjectIteration{
+						ID:        it.Id,
+						Title:     it.Title,
+						StartDate: it.StartDate,
+						Duration:  int(it.Duration),
+					}
+				}
+			}
+			proj.Fields[f.Name] = field
 		}
+	} else if len(m.StatusOptions) > 0 {
+		// Synthesize Fields from old-style StatusOptions for old mutation logs.
+		opts := make(map[string]*GitHubProjectFieldOption, len(m.StatusOptions))
+		for _, o := range m.StatusOptions {
+			opts[o.Id] = &GitHubProjectFieldOption{ID: o.Id, Name: o.Name}
+		}
+		proj.Fields = map[string]*GitHubProjectField{
+			"Status": {Name: "Status", Type: GitHubProjectFieldSingleSelect, Options: opts},
+		}
+	}
+	if proj.Fields != nil {
+		proj.sortedFieldNames = make([]string, 0, len(proj.Fields))
+		for name := range proj.Fields {
+			proj.sortedFieldNames = append(proj.sortedFieldNames, name)
+		}
+		slices.Sort(proj.sortedFieldNames)
+	}
+	if !ok {
+		// New project; rebuild sorted list.
+		c.github.projectsSorted = make([]*GitHubProject, 0, len(c.github.projects))
+		for _, p := range c.github.projects {
+			c.github.projectsSorted = append(c.github.projectsSorted, p)
+		}
+		slices.SortFunc(c.github.projectsSorted, func(a, b *GitHubProject) int {
+			if c := cmp.Compare(a.Owner, b.Owner); c != 0 {
+				return c
+			}
+			return cmp.Compare(a.Number, b.Number)
+		})
 	}
 }
 
@@ -4603,21 +4907,65 @@ func (p *githubRepoPoller) syncProjectsForIssue(ctx context.Context, issueNum in
 		// Emit project metadata mutation if needed.
 		p.maybeEmitProjectMutation(owner, proj)
 
-		optionID := item.StatusValue.OptionID
+		// Build set of known custom field names to filter out mirror field values.
+		customFields := make(map[string]bool)
+		for _, f := range proj.Fields.Nodes {
+			if f.fieldType() != "" {
+				customFields[f.Name] = true
+			}
+		}
+
+		// Build field values from all field value nodes.
+		fieldVals := make(map[string]*maintpb.GithubProjectItemFieldValue)
+		for _, fv := range item.FieldValues.Nodes {
+			if fv.Field.Name == "" || !customFields[fv.Field.Name] {
+				continue
+			}
+			pbfv := &maintpb.GithubProjectItemFieldValue{FieldName: fv.Field.Name}
+			switch {
+			case fv.OptionID != "":
+				pbfv.Value = &maintpb.GithubProjectItemFieldValue_SingleSelectOptionId{
+					SingleSelectOptionId: fv.OptionID,
+				}
+			case fv.IterationID != "":
+				pbfv.Value = &maintpb.GithubProjectItemFieldValue_IterationId{
+					IterationId: fv.IterationID,
+				}
+			case fv.Number != nil:
+				pbfv.Value = &maintpb.GithubProjectItemFieldValue_NumberValue{
+					NumberValue: *fv.Number,
+				}
+			case fv.Date != "":
+				pbfv.Value = &maintpb.GithubProjectItemFieldValue_DateValue{
+					DateValue: fv.Date,
+				}
+			case fv.Text != "":
+				pbfv.Value = &maintpb.GithubProjectItemFieldValue_TextValue{
+					TextValue: fv.Text,
+				}
+			default:
+				continue
+			}
+			fieldVals[fv.Field.Name] = pbfv
+		}
 
 		p.c.mu.RLock()
 		existing := gi.projectItems[proj.ID]
 		p.c.mu.RUnlock()
 
-		if existing != nil && existing.ItemNodeID == item.ID && existing.StatusOptionID == optionID {
+		if existing != nil && existing.itemNodeID == item.ID && !fieldValuesChanged(existing, fieldVals) {
 			continue // unchanged
 		}
 
+		pbFieldValues := make([]*maintpb.GithubProjectItemFieldValue, 0, len(fieldVals))
+		for _, fv := range fieldVals {
+			pbFieldValues = append(pbFieldValues, fv)
+		}
 		mut.ProjectItem = append(mut.ProjectItem, &maintpb.GithubIssueProjectItem{
-			ProjectNodeId:  proj.ID,
-			ItemNodeId:     item.ID,
-			StatusOptionId: optionID,
-			UpdatedAt:      timestamppb.New(item.UpdatedAt),
+			ProjectNodeId: proj.ID,
+			ItemNodeId:    item.ID,
+			FieldValues:   pbFieldValues,
+			UpdatedAt:     timestamppb.New(item.UpdatedAt),
 		})
 	}
 
@@ -4667,7 +5015,16 @@ func (p *githubRepoPoller) syncProjectsForIssue(ctx context.Context, issueNum in
 		mut.ProjectEvent = append(mut.ProjectEvent, pe)
 	}
 
-	if len(mut.ProjectItem) == 0 && len(mut.RemovedProjectItemId) == 0 && len(mut.ProjectEvent) == 0 {
+	if issueData.IssueType.Name != "" {
+		p.c.mu.RLock()
+		currentType := gi.IssueType
+		p.c.mu.RUnlock()
+		if currentType != issueData.IssueType.Name {
+			mut.IssueType = issueData.IssueType.Name
+		}
+	}
+
+	if len(mut.ProjectItem) == 0 && len(mut.RemovedProjectItemId) == 0 && len(mut.ProjectEvent) == 0 && mut.IssueType == "" {
 		return nil // nothing changed
 	}
 
@@ -4686,24 +5043,15 @@ func (p *githubRepoPoller) syncProjectsForIssue(ctx context.Context, issueNum in
 }
 
 // maybeEmitProjectMutation emits a GithubProjectMutation if the project
-// metadata (title, status options) differs from what's in the corpus.
+// metadata (title, fields) differs from what's in the corpus.
 func (p *githubRepoPoller) maybeEmitProjectMutation(owner string, proj gqlProject) {
 	p.c.mu.RLock()
 	existing := p.c.github.projects[proj.ID]
 	p.c.mu.RUnlock()
 
 	needsUpdate := existing == nil || existing.Title != proj.Title || existing.Closed != proj.Closed
-	if !needsUpdate && existing != nil && proj.StatusField.Options != nil {
-		if len(existing.StatusOptions) != len(proj.StatusField.Options) {
-			needsUpdate = true
-		} else {
-			for _, opt := range proj.StatusField.Options {
-				if eo := existing.StatusOptions[opt.ID]; eo == nil || eo.Name != opt.Name {
-					needsUpdate = true
-					break
-				}
-			}
-		}
+	if !needsUpdate && existing != nil {
+		needsUpdate = projectFieldsChanged(existing, proj.Fields.Nodes)
 	}
 	if !needsUpdate {
 		return
@@ -4716,13 +5064,115 @@ func (p *githubRepoPoller) maybeEmitProjectMutation(owner string, proj gqlProjec
 		Title:         proj.Title,
 		Closed:        &maintpb.BoolChange{Val: proj.Closed},
 	}
-	for _, opt := range proj.StatusField.Options {
-		pm.StatusOptions = append(pm.StatusOptions, &maintpb.GithubProjectStatusOption{
-			Id:   opt.ID,
-			Name: opt.Name,
-		})
+	for _, f := range proj.Fields.Nodes {
+		ft := f.fieldType()
+		if ft == "" {
+			continue // mirror or unknown field type
+		}
+		pbField := &maintpb.GithubProjectField{
+			Name: f.Name,
+			Type: string(ft),
+		}
+		for _, o := range f.Options {
+			pbField.Options = append(pbField.Options, &maintpb.GithubProjectStatusOption{
+				Id: o.ID, Name: o.Name,
+			})
+		}
+		if f.Config != nil {
+			for _, it := range f.Config.Iterations {
+				pbField.Iterations = append(pbField.Iterations, &maintpb.GithubProjectIteration{
+					Id: it.ID, Title: it.Title, StartDate: it.StartDate, Duration: int32(it.Duration),
+				})
+			}
+		}
+		pm.Fields = append(pm.Fields, pbField)
 	}
 	p.c.addMutation(&maintpb.Mutation{GithubProject: pm})
+}
+
+// projectFieldsChanged reports whether the project's field schemas have changed
+// compared to what's in the corpus.
+func projectFieldsChanged(existing *GitHubProject, gqlFields []gqlProjectField) bool {
+	// Count non-mirror fields from API.
+	var apiCount int
+	for _, f := range gqlFields {
+		if f.fieldType() != "" {
+			apiCount++
+		}
+	}
+	if len(existing.Fields) != apiCount {
+		return true
+	}
+	for _, f := range gqlFields {
+		ft := f.fieldType()
+		if ft == "" {
+			continue
+		}
+		ef := existing.Fields[f.Name]
+		if ef == nil || ef.Type != ft {
+			return true
+		}
+		// Check options for single-select.
+		if ft == GitHubProjectFieldSingleSelect {
+			if len(ef.Options) != len(f.Options) {
+				return true
+			}
+			for _, o := range f.Options {
+				if eo := ef.Options[o.ID]; eo == nil || eo.Name != o.Name {
+					return true
+				}
+			}
+		}
+		// Check iterations.
+		if ft == GitHubProjectFieldIteration && f.Config != nil {
+			if len(ef.Iterations) != len(f.Config.Iterations) {
+				return true
+			}
+			for _, it := range f.Config.Iterations {
+				ei := ef.Iterations[it.ID]
+				if ei == nil || ei.Title != it.Title || ei.StartDate != it.StartDate || ei.Duration != it.Duration {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// fieldValuesChanged reports whether the field values from a GraphQL response
+// differ from what's stored on an existing project item in the corpus.
+func fieldValuesChanged(existing *GitHubIssueProjectItem, newVals map[string]*maintpb.GithubProjectItemFieldValue) bool {
+	if len(existing.fieldValues) != len(newVals) {
+		return true
+	}
+	for name, newFV := range newVals {
+		oldRaw, ok := existing.fieldValues[name]
+		if !ok {
+			return true
+		}
+		if oldRaw != protoFieldValueString(newFV) {
+			return true
+		}
+	}
+	return false
+}
+
+// protoFieldValueString extracts the string representation of a proto field value.
+func protoFieldValueString(fv *maintpb.GithubProjectItemFieldValue) projectFieldValue {
+	switch v := fv.Value.(type) {
+	case *maintpb.GithubProjectItemFieldValue_SingleSelectOptionId:
+		return projectFieldValue(v.SingleSelectOptionId)
+	case *maintpb.GithubProjectItemFieldValue_IterationId:
+		return projectFieldValue(v.IterationId)
+	case *maintpb.GithubProjectItemFieldValue_TextValue:
+		return projectFieldValue(v.TextValue)
+	case *maintpb.GithubProjectItemFieldValue_NumberValue:
+		return projectFieldValue(strconv.FormatFloat(v.NumberValue, 'f', -1, 64))
+	case *maintpb.GithubProjectItemFieldValue_DateValue:
+		return projectFieldValue(v.DateValue)
+	default:
+		return ""
+	}
 }
 
 // GraphQL types for project sync responses.
@@ -4734,24 +5184,81 @@ type projectIssueData struct {
 	TimelineItems struct {
 		Nodes []gqlProjectTimelineEvent `json:"nodes"`
 	} `json:"timelineItems"`
+	IssueType struct {
+		Name string `json:"name"`
+	} `json:"issueType"`
 }
 
 type gqlProjectItem struct {
 	ID          string     `json:"id"`
 	UpdatedAt   time.Time  `json:"updatedAt"`
 	Project     gqlProject `json:"project"`
-	StatusValue struct {
-		OptionID string `json:"optionId"`
-	} `json:"fieldValueByName"`
+	FieldValues struct {
+		Nodes []gqlFieldValue `json:"nodes"`
+	} `json:"fieldValues"`
 }
 
 type gqlProject struct {
-	ID          string `json:"id"`
-	Number      int    `json:"number"`
+	ID     string `json:"id"`
+	Number int    `json:"number"`
+	Title  string `json:"title"`
+	Closed bool   `json:"closed"`
+	Fields struct {
+		Nodes []gqlProjectField `json:"nodes"`
+	} `json:"fields"`
+}
+
+type gqlProjectField struct {
+	Name     string            `json:"name"`
+	DataType string            `json:"dataType"` // for ProjectV2Field: "TEXT", "NUMBER", "DATE"
+	Options  []gqlStatusOption `json:"options"`  // for ProjectV2SingleSelectField
+	Config   *struct {
+		Iterations []gqlIteration `json:"iterations"`
+	} `json:"configuration"` // for ProjectV2IterationField
+}
+
+// gqlProjectFieldType returns the GitHubProjectFieldType for a gqlProjectField.
+func (f *gqlProjectField) fieldType() GitHubProjectFieldType {
+	switch {
+	case len(f.Options) > 0:
+		return GitHubProjectFieldSingleSelect
+	case f.Config != nil:
+		return GitHubProjectFieldIteration
+	case f.DataType == "NUMBER":
+		return GitHubProjectFieldNumber
+	case f.DataType == "DATE":
+		return GitHubProjectFieldDate
+	case f.DataType == "TEXT":
+		return GitHubProjectFieldText
+	default:
+		return "" // mirror or unknown field type; caller should skip
+	}
+}
+
+type gqlIteration struct {
+	ID        string `json:"id"`
+	Title     string `json:"title"`
+	StartDate string `json:"startDate"`
+	Duration  int    `json:"duration"`
+}
+
+type gqlFieldValue struct {
+	// Single-select
+	OptionID string `json:"optionId"`
+	// Iteration
+	IterationID string `json:"iterationId"`
 	Title       string `json:"title"`
-	Closed      bool   `json:"closed"`
-	StatusField struct {
-		Options []gqlStatusOption `json:"options"`
+	StartDate   string `json:"startDate"`
+	Duration    int    `json:"duration"`
+	// Text
+	Text string `json:"text"`
+	// Number
+	Number *float64 `json:"number"`
+	// Date
+	Date string `json:"date"`
+	// Common: which field this value belongs to
+	Field struct {
+		Name string `json:"name"`
 	} `json:"field"`
 }
 
@@ -4805,127 +5312,92 @@ type gqlProjectRef struct {
 // with very long project histories (>100 add/remove/status-change events),
 // we'd need pagination. In practice this is unlikely for Tailscale repos.
 // TODO: add pagination for timelineItems if needed.
-const projectsForIssueQuery = `
+// projectItemsFragment is the shared GraphQL fragment for fetching project
+// items and timeline events, used by both Issue and PullRequest.
+const projectItemsFragment = `
+        projectItems(first: 50) {
+          nodes {
+            id
+            updatedAt
+            project {
+              id
+              number
+              title
+              closed
+              fields(first: 20) {
+                nodes {
+                  ... on ProjectV2SingleSelectField { name options { id name } }
+                  ... on ProjectV2IterationField { name configuration { iterations { id title startDate duration } } }
+                  ... on ProjectV2Field { name dataType }
+                }
+              }
+            }
+            fieldValues(first: 20) {
+              nodes {
+                ... on ProjectV2ItemFieldSingleSelectValue {
+                  optionId
+                  field { ... on ProjectV2SingleSelectField { name } }
+                }
+                ... on ProjectV2ItemFieldIterationValue {
+                  iterationId title startDate duration
+                  field { ... on ProjectV2IterationField { name } }
+                }
+                ... on ProjectV2ItemFieldTextValue {
+                  text
+                  field { ... on ProjectV2Field { name } }
+                }
+                ... on ProjectV2ItemFieldNumberValue {
+                  number
+                  field { ... on ProjectV2Field { name } }
+                }
+                ... on ProjectV2ItemFieldDateValue {
+                  date
+                  field { ... on ProjectV2Field { name } }
+                }
+              }
+            }
+          }
+        }
+        timelineItems(
+          first: 100
+          itemTypes: [
+            ADDED_TO_PROJECT_V2_EVENT
+            REMOVED_FROM_PROJECT_V2_EVENT
+            PROJECT_V2_ITEM_STATUS_CHANGED_EVENT
+          ]
+        ) {
+          nodes {
+            __typename
+            ... on AddedToProjectV2Event {
+              id createdAt wasAutomated
+              actor { ... on User { databaseId login } }
+              project { id }
+            }
+            ... on RemovedFromProjectV2Event {
+              id createdAt wasAutomated
+              actor { ... on User { databaseId login } }
+              project { id }
+            }
+            ... on ProjectV2ItemStatusChangedEvent {
+              id createdAt wasAutomated
+              actor { ... on User { databaseId login } }
+              project { id }
+              previousStatus status
+            }
+          }
+        }
+`
+
+var projectsForIssueQuery = `
 query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     issueOrPullRequest(number: $number) {
       ... on Issue {
-        projectItems(first: 50) {
-          nodes {
-            id
-            updatedAt
-            project {
-              id
-              number
-              title
-              closed
-              field(name: "Status") {
-                ... on ProjectV2SingleSelectField {
-                  options { id name }
-                }
-              }
-            }
-            fieldValueByName(name: "Status") {
-              ... on ProjectV2ItemFieldSingleSelectValue {
-                optionId
-              }
-            }
-          }
-        }
-        timelineItems(
-          first: 100
-          itemTypes: [
-            ADDED_TO_PROJECT_V2_EVENT
-            REMOVED_FROM_PROJECT_V2_EVENT
-            PROJECT_V2_ITEM_STATUS_CHANGED_EVENT
-          ]
-        ) {
-          nodes {
-            __typename
-            ... on AddedToProjectV2Event {
-              id
-              createdAt
-              wasAutomated
-              actor { ... on User { databaseId login } }
-              project { id }
-            }
-            ... on RemovedFromProjectV2Event {
-              id
-              createdAt
-              wasAutomated
-              actor { ... on User { databaseId login } }
-              project { id }
-            }
-            ... on ProjectV2ItemStatusChangedEvent {
-              id
-              createdAt
-              wasAutomated
-              actor { ... on User { databaseId login } }
-              project { id }
-              previousStatus
-              status
-            }
-          }
-        }
+        issueType { name }
+` + projectItemsFragment + `
       }
       ... on PullRequest {
-        projectItems(first: 50) {
-          nodes {
-            id
-            updatedAt
-            project {
-              id
-              number
-              title
-              closed
-              field(name: "Status") {
-                ... on ProjectV2SingleSelectField {
-                  options { id name }
-                }
-              }
-            }
-            fieldValueByName(name: "Status") {
-              ... on ProjectV2ItemFieldSingleSelectValue {
-                optionId
-              }
-            }
-          }
-        }
-        timelineItems(
-          first: 100
-          itemTypes: [
-            ADDED_TO_PROJECT_V2_EVENT
-            REMOVED_FROM_PROJECT_V2_EVENT
-            PROJECT_V2_ITEM_STATUS_CHANGED_EVENT
-          ]
-        ) {
-          nodes {
-            __typename
-            ... on AddedToProjectV2Event {
-              id
-              createdAt
-              wasAutomated
-              actor { ... on User { databaseId login } }
-              project { id }
-            }
-            ... on RemovedFromProjectV2Event {
-              id
-              createdAt
-              wasAutomated
-              actor { ... on User { databaseId login } }
-              project { id }
-            }
-            ... on ProjectV2ItemStatusChangedEvent {
-              id
-              createdAt
-              wasAutomated
-              actor { ... on User { databaseId login } }
-              project { id }
-              previousStatus
-              status
-            }
-          }
-        }
+` + projectItemsFragment + `
       }
     }
   }

@@ -108,7 +108,11 @@ message GithubIssueMutation {
   repeated GithubProjectEvent project_event = 46;         // project timeline events to add
   GithubIssueSyncStatus project_event_status = 47;        // sync cursor for project events
 
-  // Next tag: 48
+  // issue_type is the native GitHub issue type name (e.g. "Bug", "Feature").
+  // Empty for pull requests or issues with no type set.
+  string issue_type = 48;
+
+  // Next tag: 49
 }
 
 // BoolChange represents a change to a boolean value.
@@ -370,30 +374,62 @@ message GitRef {
   string hash = 2;
 }
 
-// GithubProjectMutation records org-level project metadata (title, status
-// field options). Emitted on first discovery and whenever metadata changes.
+// GithubProjectMutation records org-level project metadata (title, field
+// schemas). Emitted on first discovery and whenever metadata changes.
 message GithubProjectMutation {
   string owner = 1;                                        // "tailscale"
   string project_node_id = 2;                              // "PVT_xxx"
   int64  project_number = 3;                               // project number within org
   string title = 4;
-  repeated GithubProjectStatusOption status_options = 5;   // full set of status options
+  repeated GithubProjectStatusOption status_options = 5;   // kept for backward compat (Status field options)
   BoolChange closed = 6;                                   // whether the project is closed
+  repeated GithubProjectField fields = 7;                  // all custom fields with their schemas
 }
 
 // GithubProjectStatusOption is one option in a project's Status field.
+// Kept for backward compatibility; new code uses GithubProjectField.options.
 message GithubProjectStatusOption {
   string id = 1;     // GraphQL option ID
   string name = 2;   // "Todo", "In Progress", "Done", etc.
 }
 
-// GithubIssueProjectItem records an issue's membership in one project,
-// with its current Status field value.
+// GithubProjectField records the schema of one custom field on a project.
+// Mirror fields (Labels, Assignees, etc.) are not tracked as they
+// duplicate data already on the issue.
+message GithubProjectField {
+  string name = 1;                                     // display name, e.g. "Status", "Sprint"
+  string type = 2;                                     // "single_select", "iteration", "text", "number", "date"
+  repeated GithubProjectStatusOption options = 3;      // for single_select fields
+  repeated GithubProjectIteration iterations = 4;      // for iteration fields
+}
+
+// GithubProjectIteration is one iteration in an iteration field.
+message GithubProjectIteration {
+  string id = 1;
+  string title = 2;
+  string start_date = 3;   // "YYYY-MM-DD"
+  int32 duration = 4;      // days
+}
+
+// GithubIssueProjectItem records an issue's membership in one project.
 message GithubIssueProjectItem {
-  string project_node_id = 1;   // "PVT_xxx" - which project
-  string item_node_id = 2;      // "PVTI_xxx" - the project item ID
-  string status_option_id = 3;  // ID of the status option, or "" for none
-  google.protobuf.Timestamp updated_at = 4;  // item's updatedAt from GraphQL
+  string project_node_id = 1;                              // "PVT_xxx" - which project
+  string item_node_id = 2;                                 // "PVTI_xxx" - the project item ID
+  string status_option_id = 3;                             // kept for backward compat (Status option ID)
+  google.protobuf.Timestamp updated_at = 4;                // item's updatedAt from GraphQL
+  repeated GithubProjectItemFieldValue field_values = 5;   // all custom field values
+}
+
+// GithubProjectItemFieldValue records one field's value on a project item.
+message GithubProjectItemFieldValue {
+  string field_name = 1;                       // e.g. "Status", "Sprint", "Story Points"
+  oneof value {
+    string single_select_option_id = 2;        // for single-select fields
+    string iteration_id = 3;                   // for iteration fields
+    string text_value = 4;                     // for text fields
+    double number_value = 5;                   // for number fields
+    string date_value = 6;                     // "YYYY-MM-DD" for date fields
+  }
 }
 
 // GithubProjectEvent is a project-related timeline event on an issue

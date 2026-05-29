@@ -750,7 +750,7 @@ func (gp *GerritProject) processMutation(gm *maintpb.GerritMutation) {
 	c := gp.gerrit.c
 
 	for _, commitp := range gm.Commits {
-		gc, err := c.processGitCommit(commitp)
+		gc, err := c.processGitCommit(gp.proj, commitp)
 		if err != nil {
 			gp.logf("error processing commit %q: %v", commitp.Hash, err)
 			continue

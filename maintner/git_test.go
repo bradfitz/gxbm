@@ -6,12 +6,14 @@ package maintner
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -171,11 +173,16 @@ func run(t testing.TB, dir string, name string, args ...string) string {
 }
 
 // mutationCollector is a MutationLogger that collects mutations in memory.
+// Log may be called concurrently from multiple sync goroutines (addMutation
+// invokes the logger outside c.mu), so the slice needs its own lock.
 type mutationCollector struct {
+	mu        sync.Mutex
 	mutations []*maintpb.Mutation
 }
 
 func (mc *mutationCollector) Log(m *maintpb.Mutation) error {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
 	mc.mutations = append(mc.mutations, m)
 	return nil
 }
@@ -565,5 +572,352 @@ func TestGitRefQuery(t *testing.T) {
 	}
 	if r.corpus.GitRef("testgit", "refs/heads/nonexistent") != "" {
 		t.Error("GitRef should return empty for unknown ref")
+	}
+}
+
+// TestRepoTodoIsolation regresses a bug where the pending-commit todo
+// queue was a single corpus-wide map. With many watched repos, each
+// sync goroutine drained the same map and tried to "git cat-file" the
+// other repos' hashes in its own scratch dir, failing with exit 128.
+func TestRepoTodoIsolation(t *testing.T) {
+	var c Corpus
+
+	c.mu.Lock()
+	hA := c.gitHashFromHexStr("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	hB := c.gitHashFromHexStr("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+	c.enqueueCommitLocked("repoA", hA)
+	c.enqueueCommitLocked("repoB", hB)
+	c.mu.Unlock()
+
+	if got := c.gitCommitToIndex("repoA"); got != hA {
+		t.Errorf("gitCommitToIndex(repoA) = %x; want %x", got, hA)
+	}
+	if got := c.gitCommitToIndex("repoB"); got != hB {
+		t.Errorf("gitCommitToIndex(repoB) = %x; want %x", got, hB)
+	}
+	if got := c.gitCommitToIndex("repoC"); got != "" {
+		t.Errorf("gitCommitToIndex(repoC) = %x; want empty (unknown repo)", got)
+	}
+}
+
+// TestRepoTagIsolation verifies that tag storage is per-repo so that
+// fork relationships (shared commits, distinct tag namespaces) don't
+// conflate tags across repos.
+func TestRepoTagIsolation(t *testing.T) {
+	var c Corpus
+
+	tag := &maintpb.GitTag{
+		Hash:       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		TargetHash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Raw:        []byte("object bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\ntype commit\ntag v1.0\ntagger Tagger <t@example.com> 0 +0000\n\nmsg\n"),
+	}
+
+	c.mu.Lock()
+	gtA := c.processGitTag("repoA", tag)
+	gtB := c.processGitTag("repoB", tag)
+	c.mu.Unlock()
+
+	if gtA == gtB {
+		t.Error("processGitTag returned the same *GitTag for two different repos; tags must be per-repo")
+	}
+	if got := len(c.gitRepoState["repoA"].tags); got != 1 {
+		t.Errorf("repoA tags = %d; want 1", got)
+	}
+	if got := len(c.gitRepoState["repoB"].tags); got != 1 {
+		t.Errorf("repoB tags = %d; want 1", got)
+	}
+}
+
+// TestMultiRepoSyncDisjoint is an end-to-end regression for the same
+// cross-pollution bug: two watched repos with disjoint histories share
+// a Corpus and a Sync; neither's syncGitRepoOnce should error.
+func TestMultiRepoSyncDisjoint(t *testing.T) {
+	a := newTestGitRepo(t)
+	b := addTestGitRepo(t, a.corpus, "testgitB")
+
+	a.Git("commit", "--allow-empty", "-m", "a1")
+	a.Git("commit", "--allow-empty", "-m", "a2")
+	b.Git("commit", "--allow-empty", "-m", "b1")
+	b.Git("commit", "--allow-empty", "-m", "b2")
+	b.Git("commit", "--allow-empty", "-m", "b3")
+
+	a.Sync()
+	b.Sync()
+
+	aHash := a.corpus.GitRef("testgit", "refs/heads/main")
+	if aHash == "" {
+		aHash = a.corpus.GitRef("testgit", "refs/heads/master")
+	}
+	bHash := a.corpus.GitRef("testgitB", "refs/heads/main")
+	if bHash == "" {
+		bHash = a.corpus.GitRef("testgitB", "refs/heads/master")
+	}
+	if aHash == "" || bHash == "" {
+		t.Fatalf("missing refs: a=%x b=%x", aHash, bHash)
+	}
+	if aHash == bHash {
+		t.Errorf("repos unexpectedly share a HEAD hash %x", aHash)
+	}
+
+	// Each repo's per-repo state should have drained cleanly.
+	for _, name := range []string{"testgit", "testgitB"} {
+		s := a.corpus.gitRepoState[name]
+		if s == nil {
+			t.Errorf("%s: no per-repo state", name)
+			continue
+		}
+		for h := range s.todo {
+			gc, ok := a.corpus.gitCommit[h]
+			if !ok || gc.Committer == placeholderCommitter {
+				t.Errorf("%s: pending todo %x after sync", name, h)
+			}
+		}
+	}
+}
+
+// TestMultiRepoSyncConcurrent is the strongest regression for the
+// cross-pollution bug: two goroutines drive syncGitRepoOnce on the same
+// Corpus at the same time, racing to enqueue commits and process
+// mutations. With a corpus-global todo queue, the goroutines stole each
+// other's hashes and the syncs would fail with "git cat-file" exit 128.
+func TestMultiRepoSyncConcurrent(t *testing.T) {
+	a := newTestGitRepo(t)
+	b := addTestGitRepo(t, a.corpus, "testgitB")
+
+	const commitsPerRepo = 20
+	for i := 0; i < commitsPerRepo; i++ {
+		a.Git("commit", "--allow-empty", "-m", fmt.Sprintf("a%d", i))
+		b.Git("commit", "--allow-empty", "-m", fmt.Sprintf("b%d", i))
+	}
+
+	// Prime each repo's scratch dir so the goroutines don't race on
+	// "git init --bare".
+	for _, r := range []*testGitRepo{a, b} {
+		if err := os.MkdirAll(r.scratch, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		run(t, r.scratch, "git", "init", "--bare", r.scratch)
+	}
+
+	errCh := make(chan error, 2)
+	var wg sync.WaitGroup
+	for _, r := range []*testGitRepo{a, b} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errCh <- a.corpus.syncGitRepoOnce(context.Background(), r.ws, r.scratch)
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		if err != nil {
+			t.Errorf("concurrent syncGitRepoOnce: %v", err)
+		}
+	}
+
+	// Both repos should be fully indexed: no pending hashes that aren't
+	// already in gitCommit, and the commit count should be at least
+	// commitsPerRepo for each (commits made above; initial branch commit
+	// behavior varies by git version).
+	for _, name := range []string{"testgit", "testgitB"} {
+		if got := a.corpus.GitRepoCommitCount(name); got < commitsPerRepo {
+			t.Errorf("%s: indexed %d commits; want >= %d", name, got, commitsPerRepo)
+		}
+	}
+}
+
+// TestMultiRepoForkOverlap covers the case the cross-repo isolation was
+// strengthened for: a repo (b) is a fork of another tracked repo (a), so
+// the two share part of their commit history but maintain independent
+// tag namespaces (e.g. a "v1.0" annotated tag in each pointing at
+// different commits).
+//
+// The shared commits should be deduplicated in the global gitCommit map
+// (commit hashes are content-addressed; storing twice would waste
+// memory), but the tags must NOT be conflated — each repo's
+// ForeachGitTag/GitRef should see only its own v1.0.
+func TestMultiRepoForkOverlap(t *testing.T) {
+	a := newTestGitRepo(t)
+
+	a.Git("commit", "--allow-empty", "-m", "shared 1")
+	a.Git("commit", "--allow-empty", "-m", "shared 2")
+	a.Git("commit", "--allow-empty", "-m", "shared 3")
+
+	b := forkTestGitRepo(t, a, "testgitFork")
+
+	b.Git("commit", "--allow-empty", "-m", "fork only 1")
+	b.Git("commit", "--allow-empty", "-m", "fork only 2")
+
+	// Same tag name in each repo, different content -> different tag
+	// object hashes. Annotated so they're actual tag objects.
+	a.Git("tag", "-a", "v1.0", "-m", "upstream v1.0")
+	b.Git("tag", "-a", "v1.0", "-m", "fork v1.0")
+
+	a.Sync()
+	b.Sync()
+
+	branchRef := defaultBranchRef(t, a.dir)
+	aHead := a.corpus.GitRef("testgit", branchRef)
+	bBranchRef := defaultBranchRef(t, b.dir)
+	bHead := a.corpus.GitRef("testgitFork", bBranchRef)
+	if aHead == "" || bHead == "" {
+		t.Fatalf("missing HEAD refs: a=%x b=%x", aHead, bHead)
+	}
+	if aHead == bHead {
+		t.Errorf("a and b HEADs should differ (b has fork-only commits): both = %x", aHead)
+	}
+
+	// b's HEAD chain must reach a's HEAD (shared history).
+	bGc := a.corpus.gitCommit[bHead]
+	if bGc == nil {
+		t.Fatalf("b's HEAD commit %x not indexed", bHead)
+	}
+	if !reaches(bGc, aHead) {
+		t.Errorf("b's HEAD chain does not include a's HEAD %x — shared history not deduplicated", aHead)
+	}
+
+	// v1.0 tag refs must point at different objects.
+	aTagRef := a.corpus.GitRef("testgit", "refs/tags/v1.0")
+	bTagRef := a.corpus.GitRef("testgitFork", "refs/tags/v1.0")
+	if aTagRef == "" || bTagRef == "" {
+		t.Fatalf("missing v1.0 refs: a=%x b=%x", aTagRef, bTagRef)
+	}
+	if aTagRef == bTagRef {
+		t.Errorf("a's and b's v1.0 tags collapsed to one object %x; per-repo tag namespaces were not preserved", aTagRef)
+	}
+
+	// Each repo's tag map must contain its own tag and not the other's.
+	aTags := a.corpus.gitRepoState["testgit"].tags
+	bTags := a.corpus.gitRepoState["testgitFork"].tags
+	if _, ok := aTags[aTagRef]; !ok {
+		t.Errorf("testgit tag map missing its own v1.0 (%x)", aTagRef)
+	}
+	if _, ok := aTags[bTagRef]; ok {
+		t.Errorf("testgit tag map leaked fork's v1.0 (%x)", bTagRef)
+	}
+	if _, ok := bTags[bTagRef]; !ok {
+		t.Errorf("testgitFork tag map missing its own v1.0 (%x)", bTagRef)
+	}
+	if _, ok := bTags[aTagRef]; ok {
+		t.Errorf("testgitFork tag map leaked upstream's v1.0 (%x)", aTagRef)
+	}
+
+	// Sanity: ForeachGitTag for each repo returns its own v1.0 and not the other's.
+	for _, name := range []string{"testgit", "testgitFork"} {
+		var seen []GitHash
+		a.corpus.ForeachGitTag(name, func(ti GitTagInfo) error {
+			if ti.Ref == "refs/tags/v1.0" {
+				seen = append(seen, ti.Hash)
+			}
+			return nil
+		})
+		if len(seen) != 1 {
+			t.Errorf("%s: ForeachGitTag returned %d v1.0 refs; want 1", name, len(seen))
+		}
+	}
+}
+
+// reaches reports whether starting from gc and walking parents reaches
+// the commit with hash target.
+func reaches(gc *GitCommit, target GitHash) bool {
+	seen := map[GitHash]bool{}
+	var stack []*GitCommit
+	stack = append(stack, gc)
+	for len(stack) > 0 {
+		c := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if c.Hash == target {
+			return true
+		}
+		if seen[c.Hash] {
+			continue
+		}
+		seen[c.Hash] = true
+		stack = append(stack, c.Parents...)
+	}
+	return false
+}
+
+// defaultBranchRef returns the ref name (e.g. "refs/heads/main" or
+// "refs/heads/master") that the given repo's HEAD points at. Different
+// git versions default to different branch names.
+func defaultBranchRef(t *testing.T, repoDir string) string {
+	t.Helper()
+	out := run(t, repoDir, "git", "symbolic-ref", "HEAD")
+	return strings.TrimSpace(out)
+}
+
+// forkTestGitRepo clones the underlying git repo of base into a new
+// tracked repo named name under the same Corpus, so the two repos share
+// their history up to the fork point.
+func forkTestGitRepo(t *testing.T, base *testGitRepo, name string) *testGitRepo {
+	t.Helper()
+	dir := t.TempDir()
+	repoDir := filepath.Join(dir, "repo")
+	scratchDir := filepath.Join(dir, "scratch")
+	run(t, dir, "git", "clone", "--quiet", base.dir, repoDir)
+	run(t, repoDir, "git", "config", "user.email", "test@example.com")
+	run(t, repoDir, "git", "config", "user.name", "Test User")
+
+	conf := WatchedGitRepo{
+		Name:         name,
+		Remote:       repoDir,
+		RefRegexps:   []string{`refs/heads/.*`, `refs/tags/.*`},
+		PollInterval: time.Hour,
+	}
+	ws := watchedGitRepoState{conf: conf}
+	for _, pat := range conf.RefRegexps {
+		re, err := regexp.Compile(pat)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ws.refRegexps = append(ws.refRegexps, re)
+	}
+	base.corpus.watchedGitRepoConfigs = append(base.corpus.watchedGitRepoConfigs, ws)
+
+	return &testGitRepo{
+		t:       t,
+		dir:     repoDir,
+		scratch: scratchDir,
+		corpus:  base.corpus,
+		ws:      &base.corpus.watchedGitRepoConfigs[len(base.corpus.watchedGitRepoConfigs)-1],
+	}
+}
+
+// addTestGitRepo creates a second test repo backed by the same Corpus as
+// an existing testGitRepo, so that multi-repo behavior can be exercised.
+func addTestGitRepo(t *testing.T, c *Corpus, name string) *testGitRepo {
+	t.Helper()
+	dir := t.TempDir()
+	repoDir := filepath.Join(dir, "repo")
+	scratchDir := filepath.Join(dir, "scratch")
+	run(t, dir, "git", "init", repoDir)
+	run(t, repoDir, "git", "config", "user.email", "test@example.com")
+	run(t, repoDir, "git", "config", "user.name", "Test User")
+
+	conf := WatchedGitRepo{
+		Name:         name,
+		Remote:       repoDir,
+		RefRegexps:   []string{`refs/heads/.*`, `refs/tags/.*`},
+		PollInterval: time.Hour,
+	}
+	ws := watchedGitRepoState{conf: conf}
+	for _, pat := range conf.RefRegexps {
+		re, err := regexp.Compile(pat)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ws.refRegexps = append(ws.refRegexps, re)
+	}
+	c.watchedGitRepoConfigs = append(c.watchedGitRepoConfigs, ws)
+
+	return &testGitRepo{
+		t:       t,
+		dir:     repoDir,
+		scratch: scratchDir,
+		corpus:  c,
+		ws:      &c.watchedGitRepoConfigs[len(c.watchedGitRepoConfigs)-1],
 	}
 }

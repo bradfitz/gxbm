@@ -203,15 +203,18 @@ func (p *GitPerson) Name() string {
 // String implements fmt.Stringer.
 func (p *GitPerson) String() string { return p.Str }
 
-// requires c.mu be held for writing.
-func (c *Corpus) enqueueCommitLocked(h GitHash) {
+// enqueueCommitLocked records that h needs to be indexed by the goroutine
+// syncing repo (the watched repo name, e.g. "tailscale/tailscale", or a
+// Gerrit "server/project"). The per-repo todo queue prevents goroutines
+// from stealing each other's hashes and failing with "git cat-file"
+// errors because the object isn't in their scratch dir.
+//
+// Requires c.mu be held for writing.
+func (c *Corpus) enqueueCommitLocked(repo string, h GitHash) {
 	if _, ok := c.gitCommit[h]; ok {
 		return
 	}
-	if c.gitCommitTodo == nil {
-		c.gitCommitTodo = map[GitHash]bool{}
-	}
-	c.gitCommitTodo[h] = true
+	c.repoStateLocked(repo).todo[h] = true
 }
 
 // syncGitCommits polls for git commits in a directory.
@@ -227,14 +230,15 @@ func (c *Corpus) syncGitCommits(ctx context.Context, conf polledGitCommits, loop
 		return fmt.Errorf("no remote found for refs/remotes/origin/master")
 	}
 	ref := strings.Fields(outs)[0]
+	repoName := gitRepoNameFromPB(conf.repo)
 	c.mu.Lock()
 	refHash := c.gitHashFromHexStr(ref)
-	c.enqueueCommitLocked(refHash)
+	c.enqueueCommitLocked(repoName, refHash)
 	c.mu.Unlock()
 
 	idle := false
 	for {
-		hash := c.gitCommitToIndex()
+		hash := c.gitCommitToIndex(repoName)
 		if hash == "" {
 			if !loop {
 				return nil
@@ -259,11 +263,17 @@ func (c *Corpus) syncGitCommits(ctx context.Context, conf polledGitCommits, loop
 	}
 }
 
-// returns nil if no work.
-func (c *Corpus) gitCommitToIndex() GitHash {
+// gitCommitToIndex returns a hash queued for indexing in repo, or "" if
+// none. Per-repo todo queues prevent goroutines from stealing each
+// other's pending hashes; see enqueueCommitLocked.
+func (c *Corpus) gitCommitToIndex(repo string) GitHash {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	for hash := range c.gitCommitTodo {
+	s, ok := c.gitRepoState[repo]
+	if !ok {
+		return ""
+	}
+	for hash := range s.todo {
 		gc, ok := c.gitCommit[hash]
 		if !ok || gc.Committer == placeholderCommitter {
 			return hash
@@ -419,7 +429,7 @@ func (c *Corpus) processGitMutation(m *maintpb.GitMutation) {
 	}
 
 	if commit := m.Commit; commit != nil {
-		gc, err := c.processGitCommit(commit)
+		gc, err := c.processGitCommit(repoName, commit)
 		if err != nil {
 			return
 		}
@@ -435,33 +445,31 @@ func (c *Corpus) processGitMutation(m *maintpb.GitMutation) {
 	}
 
 	if ru := m.RefUpdate; ru != nil && repoName != "" {
-		if c.gitRefs == nil {
-			c.gitRefs = make(map[string]map[string]GitHash)
-		}
-		refs := c.gitRefs[repoName]
-		if refs == nil {
-			refs = make(map[string]GitHash)
-			c.gitRefs[repoName] = refs
-		}
-		refs[ru.Ref] = c.gitHashFromHexStr(ru.Hash)
+		c.repoStateLocked(repoName).refs[ru.Ref] = c.gitHashFromHexStr(ru.Hash)
 	}
 
 	if tag := m.Tag; tag != nil {
-		gt := c.processGitTag(tag)
+		gt := c.processGitTag(repoName, tag)
 		if gt.Repo == "" && repoName != "" {
 			gt.Repo = repoName
 		}
 	}
 }
 
+// processGitTag stores the tag under repo's per-repo tag namespace. Two
+// repos may legitimately have tags with the same content (identical hash)
+// or the same tag name pointing at different content; per-repo storage
+// keeps them disjoint.
+//
 // c.mu is held for writing.
-func (c *Corpus) processGitTag(tag *maintpb.GitTag) *GitTag {
+func (c *Corpus) processGitTag(repo string, tag *maintpb.GitTag) *GitTag {
 	if !ValidHexHashLen(tag.Hash) || !ValidHexHashLen(tag.TargetHash) {
 		c.logf("bogus git tag hash %q / target %q", tag.Hash, tag.TargetHash)
 		return &GitTag{}
 	}
 	hash := c.gitHashFromHexStr(tag.Hash)
-	if gt, ok := c.gitTags[hash]; ok {
+	s := c.repoStateLocked(repo)
+	if gt, ok := s.tags[hash]; ok {
 		return gt
 	}
 
@@ -486,15 +494,16 @@ func (c *Corpus) processGitTag(tag *maintpb.GitTag) *GitTag {
 		}
 	}
 
-	if c.gitTags == nil {
-		c.gitTags = make(map[GitHash]*GitTag)
-	}
-	c.gitTags[hash] = gt
+	s.tags[hash] = gt
 	return gt
 }
 
 // c.mu is held for writing.
-func (c *Corpus) processGitCommit(commit *maintpb.GitCommit) (*GitCommit, error) {
+// processGitCommit processes a GitCommit mutation. repo is the name of
+// the repository being indexed (e.g. "tailscale/tailscale" or a Gerrit
+// "server/project"); it is used to tag any newly-enqueued parent commits
+// so the right goroutine picks them up.
+func (c *Corpus) processGitCommit(repo string, commit *maintpb.GitCommit) (*GitCommit, error) {
 	if c.gitCommit == nil {
 		c.gitCommit = map[GitHash]*GitCommit{}
 	}
@@ -543,7 +552,7 @@ func (c *Corpus) processGitCommit(commit *maintpb.GitCommit) (*GitCommit, error)
 			if parent == nil {
 				// Enqueue for indexing before installing placeholder,
 				// since enqueueCommitLocked skips hashes already in gitCommit.
-				c.enqueueCommitLocked(parentHash)
+				c.enqueueCommitLocked(repo, parentHash)
 				// Install a placeholder to be filled in later.
 				parent = &GitCommit{
 					Hash:      parentHash,
@@ -607,8 +616,12 @@ func (c *Corpus) processGitCommit(commit *maintpb.GitCommit) (*GitCommit, error)
 	} else {
 		c.gitCommit[hash] = gc
 	}
-	if c.gitCommitTodo != nil {
-		delete(c.gitCommitTodo, hash)
+	// Drop this hash from every repo's todo. Usually only repo's todo had
+	// it, but if other repos enqueued it concurrently (fork scenario, or
+	// shared parent chains) clean up the stale entries so gitCommitToIndex
+	// doesn't iterate them forever.
+	for _, s := range c.gitRepoState {
+		delete(s.todo, hash)
 	}
 	if c.verbose {
 		now := time.Now()
@@ -778,8 +791,8 @@ func (c *Corpus) syncGitRepoOnce(ctx context.Context, ws *watchedGitRepoState, d
 		// 3. Compare against known refs from mutation log
 		c.mu.RLock()
 		var knownHash GitHash
-		if refs := c.gitRefs[ws.conf.Name]; refs != nil {
-			knownHash = refs[refName]
+		if s := c.gitRepoState[ws.conf.Name]; s != nil {
+			knownHash = s.refs[refName]
 		}
 		c.mu.RUnlock()
 
@@ -834,7 +847,7 @@ func (c *Corpus) syncGitRepoOnce(ctx context.Context, ws *watchedGitRepoState, d
 	c.mu.Lock()
 	for _, u := range updates {
 		h := c.gitHashFromHexStr(u.commitHash)
-		c.enqueueCommitLocked(h)
+		c.enqueueCommitLocked(ws.conf.Name, h)
 	}
 	c.mu.Unlock()
 
@@ -842,7 +855,7 @@ func (c *Corpus) syncGitRepoOnce(ctx context.Context, ws *watchedGitRepoState, d
 	conf := polledGitCommits{repo: repo, dir: dir}
 	indexed := 0
 	for {
-		hash := c.gitCommitToIndex()
+		hash := c.gitCommitToIndex(ws.conf.Name)
 		if hash == "" {
 			break
 		}

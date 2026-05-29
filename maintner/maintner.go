@@ -72,9 +72,7 @@ type Corpus struct {
 	gitPeople             map[string]*GitPerson
 	gitCommit             map[GitHash]*GitCommit
 	gitRepos              map[string]bool               // repo names seen in git mutations
-	gitRefs               map[string]map[string]GitHash // repo name -> ref name -> hash
-	gitTags               map[GitHash]*GitTag           // tag object hash -> parsed tag
-	gitCommitTodo         map[GitHash]bool              // -> true
+	gitRepoState          map[string]*repoGitState      // repo name -> per-repo state (refs, todo queue, tags)
 	gitOfHg               map[string]GitHash            // hg hex hash -> git hash
 	zoneCache             map[string]*time.Location     // "+0530" => location
 }
@@ -91,6 +89,50 @@ func (c *Corpus) RUnlock() { c.mu.RUnlock() }
 type polledGitCommits struct {
 	repo *maintpb.GitRepo
 	dir  string
+}
+
+// gitRepoNameFromPB returns a stable identifier for r used to scope
+// per-repo git state to the goroutine that owns it.
+func gitRepoNameFromPB(r *maintpb.GitRepo) string {
+	if r == nil {
+		return ""
+	}
+	if r.Name != "" {
+		return r.Name
+	}
+	return r.GoRepo
+}
+
+// repoGitState holds per-repo git data that must NOT be shared across
+// repositories. Sharing leads to two failure modes:
+//   - Sync goroutines drain each other's pending-commit hashes from a
+//     global queue and fail with "git cat-file" exit 128 because the
+//     object is only in the other repo's scratch dir.
+//   - Repos that are forks of each other (sharing some commit history)
+//     can have distinct tag and ref namespaces; a global map would
+//     conflate unrelated tags or refs that happen to share a name.
+type repoGitState struct {
+	refs map[string]GitHash  // ref name -> hash (e.g. "refs/heads/main" -> commit hash)
+	todo map[GitHash]bool    // pending commit hashes this repo's walk must index
+	tags map[GitHash]*GitTag // annotated tag object hash -> tag, scoped to this repo
+}
+
+// repoStateLocked returns (creating if needed) the per-repo state for
+// repo. Requires c.mu held for writing.
+func (c *Corpus) repoStateLocked(repo string) *repoGitState {
+	if c.gitRepoState == nil {
+		c.gitRepoState = map[string]*repoGitState{}
+	}
+	s := c.gitRepoState[repo]
+	if s == nil {
+		s = &repoGitState{
+			refs: map[string]GitHash{},
+			todo: map[GitHash]bool{},
+			tags: map[GitHash]*GitTag{},
+		}
+		c.gitRepoState[repo] = s
+	}
+	return s
 }
 
 // EnableLeaderMode prepares c to be the leader. This should only be
@@ -650,7 +692,10 @@ func (c *Corpus) GitRepoCommitCount(repoName string) int {
 
 // GitRepoRefCount returns the number of refs for a given repo name.
 func (c *Corpus) GitRepoRefCount(repoName string) int {
-	return len(c.gitRefs[repoName])
+	if s := c.gitRepoState[repoName]; s != nil {
+		return len(s.refs)
+	}
+	return 0
 }
 
 // NumGitCommits returns the number of git commits in the corpus.
@@ -659,20 +704,27 @@ func (c *Corpus) NumGitCommits() int { return len(c.gitCommit) }
 // NumGitRefs returns the total number of git refs across all repos.
 func (c *Corpus) NumGitRefs() int {
 	n := 0
-	for _, refs := range c.gitRefs {
-		n += len(refs)
+	for _, s := range c.gitRepoState {
+		n += len(s.refs)
 	}
 	return n
 }
 
-// NumGitTags returns the number of annotated git tags in the corpus.
-func (c *Corpus) NumGitTags() int { return len(c.gitTags) }
+// NumGitTags returns the number of annotated git tags in the corpus
+// across all repos.
+func (c *Corpus) NumGitTags() int {
+	n := 0
+	for _, s := range c.gitRepoState {
+		n += len(s.tags)
+	}
+	return n
+}
 
 // GitRef returns the commit hash for a given repo and ref name, or
 // the zero GitHash if not known.
 func (c *Corpus) GitRef(repoName, refName string) GitHash {
-	if refs := c.gitRefs[repoName]; refs != nil {
-		return refs[refName]
+	if s := c.gitRepoState[repoName]; s != nil {
+		return s.refs[refName]
 	}
 	return ""
 }
@@ -712,8 +764,8 @@ func (c *Corpus) ForeachGitCommitForRepo(repoName string, fn func(*GitCommit) er
 
 // ForeachGitRef calls fn for each tracked git ref across all watched repos.
 func (c *Corpus) ForeachGitRef(fn func(GitRefInfo) error) error {
-	for repo, refs := range c.gitRefs {
-		for ref, hash := range refs {
+	for repo, s := range c.gitRepoState {
+		for ref, hash := range s.refs {
 			if err := fn(GitRefInfo{Repo: repo, Ref: ref, Hash: hash}); err != nil {
 				return err
 			}
@@ -724,7 +776,11 @@ func (c *Corpus) ForeachGitRef(fn func(GitRefInfo) error) error {
 
 // ForeachGitRepoRef calls fn for each tracked git ref in the named repo.
 func (c *Corpus) ForeachGitRepoRef(repoName string, fn func(GitRefInfo) error) error {
-	for ref, hash := range c.gitRefs[repoName] {
+	s := c.gitRepoState[repoName]
+	if s == nil {
+		return nil
+	}
+	for ref, hash := range s.refs {
 		if err := fn(GitRefInfo{Repo: repoName, Ref: ref, Hash: hash}); err != nil {
 			return err
 		}
@@ -744,7 +800,11 @@ type GitTagInfo struct {
 // ForeachGitTag calls fn for each tag ref in the named repo.
 // Both lightweight and annotated tags are included.
 func (c *Corpus) ForeachGitTag(repoName string, fn func(GitTagInfo) error) error {
-	for ref, hash := range c.gitRefs[repoName] {
+	s := c.gitRepoState[repoName]
+	if s == nil {
+		return nil
+	}
+	for ref, hash := range s.refs {
 		if !strings.HasPrefix(ref, "refs/tags/") {
 			continue
 		}
@@ -753,10 +813,11 @@ func (c *Corpus) ForeachGitTag(repoName string, fn func(GitTagInfo) error) error
 			Ref:  ref,
 			Hash: hash,
 		}
-		if gt := c.gitTags[hash]; gt != nil {
+		if gt := s.tags[hash]; gt != nil {
 			info.Tag = gt
 			info.CommitHash = gt.Target
-		} else {
+		}
+		if info.CommitHash == "" {
 			info.CommitHash = hash
 		}
 		if err := fn(info); err != nil {
@@ -767,7 +828,14 @@ func (c *Corpus) ForeachGitTag(repoName string, fn func(GitTagInfo) error) error
 }
 
 // GitTagByHash returns the parsed annotated tag object for the given hash,
-// or nil if the hash is not a known tag object.
+// or nil if the hash is not a known tag object in any tracked repo.
+// Tag storage is per-repo, but tag object hashes are content-addressed,
+// so this scans repos until it finds a match.
 func (c *Corpus) GitTagByHash(hash GitHash) *GitTag {
-	return c.gitTags[hash]
+	for _, s := range c.gitRepoState {
+		if gt := s.tags[hash]; gt != nil {
+			return gt
+		}
+	}
+	return nil
 }

@@ -245,9 +245,16 @@ type GithubIssueMutation struct {
 	ProjectEventStatus   *GithubIssueSyncStatus    `protobuf:"bytes,47,opt,name=project_event_status,json=projectEventStatus,proto3" json:"project_event_status,omitempty"`         // sync cursor for project events
 	// issue_type is the native GitHub issue type name (e.g. "Bug", "Feature").
 	// Empty for pull requests or issues with no type set.
-	IssueType     string `protobuf:"bytes,48,opt,name=issue_type,json=issueType,proto3" json:"issue_type,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	IssueType string `protobuf:"bytes,48,opt,name=issue_type,json=issueType,proto3" json:"issue_type,omitempty"`
+	// Org-level "Issue fields" (GitHub's structured issue metadata, distinct from
+	// Projects V2 fields). issue_field carries the full current set as a snapshot
+	// whenever any value changes; issue_fields_synced marks that snapshot
+	// authoritative (including the all-cleared case where issue_field is empty),
+	// distinguishing it from a mutation that simply doesn't touch issue fields.
+	IssueField        []*GithubIssueFieldValue `protobuf:"bytes,49,rep,name=issue_field,json=issueField,proto3" json:"issue_field,omitempty"`
+	IssueFieldsSynced bool                     `protobuf:"varint,50,opt,name=issue_fields_synced,json=issueFieldsSynced,proto3" json:"issue_fields_synced,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *GithubIssueMutation) Reset() {
@@ -607,6 +614,20 @@ func (x *GithubIssueMutation) GetIssueType() string {
 		return x.IssueType
 	}
 	return ""
+}
+
+func (x *GithubIssueMutation) GetIssueField() []*GithubIssueFieldValue {
+	if x != nil {
+		return x.IssueField
+	}
+	return nil
+}
+
+func (x *GithubIssueMutation) GetIssueFieldsSynced() bool {
+	if x != nil {
+		return x.IssueFieldsSynced
+	}
+	return false
 }
 
 // BoolChange represents a change to a boolean value.
@@ -2637,6 +2658,61 @@ func (*GithubProjectItemFieldValue_NumberValue) isGithubProjectItemFieldValue_Va
 
 func (*GithubProjectItemFieldValue_DateValue) isGithubProjectItemFieldValue_Value() {}
 
+// GithubIssueFieldValue records one org-level "Issue field" value on an issue.
+// These are GitHub's structured issue metadata, distinct from Projects V2
+// fields. The value is the field's display string.
+type GithubIssueFieldValue struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	FieldName     string                 `protobuf:"bytes,1,opt,name=field_name,json=fieldName,proto3" json:"field_name,omitempty"` // the issue field's name
+	Value         string                 `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`                          // the field's display value
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GithubIssueFieldValue) Reset() {
+	*x = GithubIssueFieldValue{}
+	mi := &file_maintner_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GithubIssueFieldValue) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GithubIssueFieldValue) ProtoMessage() {}
+
+func (x *GithubIssueFieldValue) ProtoReflect() protoreflect.Message {
+	mi := &file_maintner_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GithubIssueFieldValue.ProtoReflect.Descriptor instead.
+func (*GithubIssueFieldValue) Descriptor() ([]byte, []int) {
+	return file_maintner_proto_rawDescGZIP(), []int{31}
+}
+
+func (x *GithubIssueFieldValue) GetFieldName() string {
+	if x != nil {
+		return x.FieldName
+	}
+	return ""
+}
+
+func (x *GithubIssueFieldValue) GetValue() string {
+	if x != nil {
+		return x.Value
+	}
+	return ""
+}
+
 // GithubProjectEvent is a project-related timeline event on an issue
 // (added to project, removed from project, or status changed).
 type GithubProjectEvent struct {
@@ -2656,7 +2732,7 @@ type GithubProjectEvent struct {
 
 func (x *GithubProjectEvent) Reset() {
 	*x = GithubProjectEvent{}
-	mi := &file_maintner_proto_msgTypes[31]
+	mi := &file_maintner_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2668,7 +2744,7 @@ func (x *GithubProjectEvent) String() string {
 func (*GithubProjectEvent) ProtoMessage() {}
 
 func (x *GithubProjectEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_maintner_proto_msgTypes[31]
+	mi := &file_maintner_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2681,7 +2757,7 @@ func (x *GithubProjectEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GithubProjectEvent.ProtoReflect.Descriptor instead.
 func (*GithubProjectEvent) Descriptor() ([]byte, []int) {
-	return file_maintner_proto_rawDescGZIP(), []int{31}
+	return file_maintner_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *GithubProjectEvent) GetId() string {
@@ -2753,7 +2829,7 @@ type GithubActionsMutation struct {
 
 func (x *GithubActionsMutation) Reset() {
 	*x = GithubActionsMutation{}
-	mi := &file_maintner_proto_msgTypes[32]
+	mi := &file_maintner_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2765,7 +2841,7 @@ func (x *GithubActionsMutation) String() string {
 func (*GithubActionsMutation) ProtoMessage() {}
 
 func (x *GithubActionsMutation) ProtoReflect() protoreflect.Message {
-	mi := &file_maintner_proto_msgTypes[32]
+	mi := &file_maintner_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2778,7 +2854,7 @@ func (x *GithubActionsMutation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GithubActionsMutation.ProtoReflect.Descriptor instead.
 func (*GithubActionsMutation) Descriptor() ([]byte, []int) {
-	return file_maintner_proto_rawDescGZIP(), []int{32}
+	return file_maintner_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *GithubActionsMutation) GetOwner() string {
@@ -2833,7 +2909,7 @@ type GithubWorkflowRun struct {
 
 func (x *GithubWorkflowRun) Reset() {
 	*x = GithubWorkflowRun{}
-	mi := &file_maintner_proto_msgTypes[33]
+	mi := &file_maintner_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2845,7 +2921,7 @@ func (x *GithubWorkflowRun) String() string {
 func (*GithubWorkflowRun) ProtoMessage() {}
 
 func (x *GithubWorkflowRun) ProtoReflect() protoreflect.Message {
-	mi := &file_maintner_proto_msgTypes[33]
+	mi := &file_maintner_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2858,7 +2934,7 @@ func (x *GithubWorkflowRun) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GithubWorkflowRun.ProtoReflect.Descriptor instead.
 func (*GithubWorkflowRun) Descriptor() ([]byte, []int) {
-	return file_maintner_proto_rawDescGZIP(), []int{33}
+	return file_maintner_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *GithubWorkflowRun) GetId() int64 {
@@ -2991,7 +3067,7 @@ type GithubWorkflowJob struct {
 
 func (x *GithubWorkflowJob) Reset() {
 	*x = GithubWorkflowJob{}
-	mi := &file_maintner_proto_msgTypes[34]
+	mi := &file_maintner_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3003,7 +3079,7 @@ func (x *GithubWorkflowJob) String() string {
 func (*GithubWorkflowJob) ProtoMessage() {}
 
 func (x *GithubWorkflowJob) ProtoReflect() protoreflect.Message {
-	mi := &file_maintner_proto_msgTypes[34]
+	mi := &file_maintner_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3016,7 +3092,7 @@ func (x *GithubWorkflowJob) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GithubWorkflowJob.ProtoReflect.Descriptor instead.
 func (*GithubWorkflowJob) Descriptor() ([]byte, []int) {
-	return file_maintner_proto_rawDescGZIP(), []int{34}
+	return file_maintner_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *GithubWorkflowJob) GetId() int64 {
@@ -3103,7 +3179,7 @@ type GithubWorkflowStep struct {
 
 func (x *GithubWorkflowStep) Reset() {
 	*x = GithubWorkflowStep{}
-	mi := &file_maintner_proto_msgTypes[35]
+	mi := &file_maintner_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3115,7 +3191,7 @@ func (x *GithubWorkflowStep) String() string {
 func (*GithubWorkflowStep) ProtoMessage() {}
 
 func (x *GithubWorkflowStep) ProtoReflect() protoreflect.Message {
-	mi := &file_maintner_proto_msgTypes[35]
+	mi := &file_maintner_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3128,7 +3204,7 @@ func (x *GithubWorkflowStep) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GithubWorkflowStep.ProtoReflect.Descriptor instead.
 func (*GithubWorkflowStep) Descriptor() ([]byte, []int) {
-	return file_maintner_proto_rawDescGZIP(), []int{35}
+	return file_maintner_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *GithubWorkflowStep) GetName() string {
@@ -3191,7 +3267,7 @@ const file_maintner_proto_rawDesc = "" +
 	"\x06labels\x18\x03 \x03(\v2\x14.maintpb.GithubLabelR\x06labels\x128\n" +
 	"\n" +
 	"milestones\x18\x04 \x03(\v2\x18.maintpb.GithubMilestoneR\n" +
-	"milestones\"\xe3\x11\n" +
+	"milestones\"\xd4\x12\n" +
 	"\x13GithubIssueMutation\x12\x14\n" +
 	"\x05owner\x18\x01 \x01(\tR\x05owner\x12\x12\n" +
 	"\x04repo\x18\x02 \x01(\tR\x04repo\x12\x16\n" +
@@ -3242,7 +3318,10 @@ const file_maintner_proto_rawDesc = "" +
 	"\rproject_event\x18. \x03(\v2\x1b.maintpb.GithubProjectEventR\fprojectEvent\x12P\n" +
 	"\x14project_event_status\x18/ \x01(\v2\x1e.maintpb.GithubIssueSyncStatusR\x12projectEventStatus\x12\x1d\n" +
 	"\n" +
-	"issue_type\x180 \x01(\tR\tissueType\"\x1e\n" +
+	"issue_type\x180 \x01(\tR\tissueType\x12?\n" +
+	"\vissue_field\x181 \x03(\v2\x1e.maintpb.GithubIssueFieldValueR\n" +
+	"issueField\x12.\n" +
+	"\x13issue_fields_synced\x182 \x01(\bR\x11issueFieldsSynced\"\x1e\n" +
 	"\n" +
 	"BoolChange\x12\x10\n" +
 	"\x03val\x18\x01 \x01(\bR\x03val\" \n" +
@@ -3402,7 +3481,11 @@ const file_maintner_proto_rawDesc = "" +
 	"\fnumber_value\x18\x05 \x01(\x01H\x00R\vnumberValue\x12\x1f\n" +
 	"\n" +
 	"date_value\x18\x06 \x01(\tH\x00R\tdateValueB\a\n" +
-	"\x05value\"\xa2\x02\n" +
+	"\x05value\"L\n" +
+	"\x15GithubIssueFieldValue\x12\x1d\n" +
+	"\n" +
+	"field_name\x18\x01 \x01(\tR\tfieldName\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value\"\xa2\x02\n" +
 	"\x12GithubProjectEvent\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1d\n" +
 	"\n" +
@@ -3480,7 +3563,7 @@ func file_maintner_proto_rawDescGZIP() []byte {
 	return file_maintner_proto_rawDescData
 }
 
-var file_maintner_proto_msgTypes = make([]protoimpl.MessageInfo, 36)
+var file_maintner_proto_msgTypes = make([]protoimpl.MessageInfo, 37)
 var file_maintner_proto_goTypes = []any{
 	(*Mutation)(nil),                    // 0: maintpb.Mutation
 	(*GithubMutation)(nil),              // 1: maintpb.GithubMutation
@@ -3513,17 +3596,18 @@ var file_maintner_proto_goTypes = []any{
 	(*GithubProjectIteration)(nil),      // 28: maintpb.GithubProjectIteration
 	(*GithubIssueProjectItem)(nil),      // 29: maintpb.GithubIssueProjectItem
 	(*GithubProjectItemFieldValue)(nil), // 30: maintpb.GithubProjectItemFieldValue
-	(*GithubProjectEvent)(nil),          // 31: maintpb.GithubProjectEvent
-	(*GithubActionsMutation)(nil),       // 32: maintpb.GithubActionsMutation
-	(*GithubWorkflowRun)(nil),           // 33: maintpb.GithubWorkflowRun
-	(*GithubWorkflowJob)(nil),           // 34: maintpb.GithubWorkflowJob
-	(*GithubWorkflowStep)(nil),          // 35: maintpb.GithubWorkflowStep
-	(*timestamppb.Timestamp)(nil),       // 36: google.protobuf.Timestamp
+	(*GithubIssueFieldValue)(nil),       // 31: maintpb.GithubIssueFieldValue
+	(*GithubProjectEvent)(nil),          // 32: maintpb.GithubProjectEvent
+	(*GithubActionsMutation)(nil),       // 33: maintpb.GithubActionsMutation
+	(*GithubWorkflowRun)(nil),           // 34: maintpb.GithubWorkflowRun
+	(*GithubWorkflowJob)(nil),           // 35: maintpb.GithubWorkflowJob
+	(*GithubWorkflowStep)(nil),          // 36: maintpb.GithubWorkflowStep
+	(*timestamppb.Timestamp)(nil),       // 37: google.protobuf.Timestamp
 }
 var file_maintner_proto_depIdxs = []int32{
 	2,  // 0: maintpb.Mutation.github_issue:type_name -> maintpb.GithubIssueMutation
 	1,  // 1: maintpb.Mutation.github:type_name -> maintpb.GithubMutation
-	32, // 2: maintpb.Mutation.github_actions:type_name -> maintpb.GithubActionsMutation
+	33, // 2: maintpb.Mutation.github_actions:type_name -> maintpb.GithubActionsMutation
 	25, // 3: maintpb.Mutation.github_project:type_name -> maintpb.GithubProjectMutation
 	17, // 4: maintpb.Mutation.git:type_name -> maintpb.GitMutation
 	23, // 5: maintpb.Mutation.gerrit:type_name -> maintpb.GerritMutation
@@ -3531,12 +3615,12 @@ var file_maintner_proto_depIdxs = []int32{
 	6,  // 7: maintpb.GithubMutation.milestones:type_name -> maintpb.GithubMilestone
 	13, // 8: maintpb.GithubIssueMutation.user:type_name -> maintpb.GithubUser
 	13, // 9: maintpb.GithubIssueMutation.assignees:type_name -> maintpb.GithubUser
-	36, // 10: maintpb.GithubIssueMutation.created:type_name -> google.protobuf.Timestamp
-	36, // 11: maintpb.GithubIssueMutation.updated:type_name -> google.protobuf.Timestamp
+	37, // 10: maintpb.GithubIssueMutation.created:type_name -> google.protobuf.Timestamp
+	37, // 11: maintpb.GithubIssueMutation.updated:type_name -> google.protobuf.Timestamp
 	4,  // 12: maintpb.GithubIssueMutation.body_change:type_name -> maintpb.StringChange
 	3,  // 13: maintpb.GithubIssueMutation.closed:type_name -> maintpb.BoolChange
 	3,  // 14: maintpb.GithubIssueMutation.locked:type_name -> maintpb.BoolChange
-	36, // 15: maintpb.GithubIssueMutation.closed_at:type_name -> google.protobuf.Timestamp
+	37, // 15: maintpb.GithubIssueMutation.closed_at:type_name -> google.protobuf.Timestamp
 	13, // 16: maintpb.GithubIssueMutation.closed_by:type_name -> maintpb.GithubUser
 	5,  // 17: maintpb.GithubIssueMutation.add_label:type_name -> maintpb.GithubLabel
 	12, // 18: maintpb.GithubIssueMutation.comment:type_name -> maintpb.GithubIssueCommentMutation
@@ -3549,60 +3633,61 @@ var file_maintner_proto_depIdxs = []int32{
 	11, // 25: maintpb.GithubIssueMutation.reaction_status:type_name -> maintpb.GithubIssueSyncStatus
 	3,  // 26: maintpb.GithubIssueMutation.draft:type_name -> maintpb.BoolChange
 	3,  // 27: maintpb.GithubIssueMutation.merged:type_name -> maintpb.BoolChange
-	36, // 28: maintpb.GithubIssueMutation.merged_at:type_name -> google.protobuf.Timestamp
+	37, // 28: maintpb.GithubIssueMutation.merged_at:type_name -> google.protobuf.Timestamp
 	13, // 29: maintpb.GithubIssueMutation.merged_by:type_name -> maintpb.GithubUser
 	16, // 30: maintpb.GithubIssueMutation.head:type_name -> maintpb.GithubPullRequestBranch
 	16, // 31: maintpb.GithubIssueMutation.base:type_name -> maintpb.GithubPullRequestBranch
 	11, // 32: maintpb.GithubIssueMutation.pr_detail_status:type_name -> maintpb.GithubIssueSyncStatus
 	29, // 33: maintpb.GithubIssueMutation.project_item:type_name -> maintpb.GithubIssueProjectItem
 	11, // 34: maintpb.GithubIssueMutation.project_status:type_name -> maintpb.GithubIssueSyncStatus
-	31, // 35: maintpb.GithubIssueMutation.project_event:type_name -> maintpb.GithubProjectEvent
+	32, // 35: maintpb.GithubIssueMutation.project_event:type_name -> maintpb.GithubProjectEvent
 	11, // 36: maintpb.GithubIssueMutation.project_event_status:type_name -> maintpb.GithubIssueSyncStatus
-	3,  // 37: maintpb.GithubMilestone.closed:type_name -> maintpb.BoolChange
-	36, // 38: maintpb.GithubIssueEvent.created:type_name -> google.protobuf.Timestamp
-	5,  // 39: maintpb.GithubIssueEvent.label:type_name -> maintpb.GithubLabel
-	6,  // 40: maintpb.GithubIssueEvent.milestone:type_name -> maintpb.GithubMilestone
-	9,  // 41: maintpb.GithubIssueEvent.commit:type_name -> maintpb.GithubCommit
-	15, // 42: maintpb.GithubIssueEvent.team_reviewer:type_name -> maintpb.GithubTeam
-	8,  // 43: maintpb.GithubIssueEvent.dismissed_review:type_name -> maintpb.GithubDismissedReviewEvent
-	36, // 44: maintpb.GithubReview.created:type_name -> google.protobuf.Timestamp
-	36, // 45: maintpb.GithubIssueSyncStatus.server_date:type_name -> google.protobuf.Timestamp
-	13, // 46: maintpb.GithubIssueCommentMutation.user:type_name -> maintpb.GithubUser
-	36, // 47: maintpb.GithubIssueCommentMutation.created:type_name -> google.protobuf.Timestamp
-	36, // 48: maintpb.GithubIssueCommentMutation.updated:type_name -> google.protobuf.Timestamp
-	14, // 49: maintpb.GithubIssueCommentMutation.reaction:type_name -> maintpb.GithubReaction
-	36, // 50: maintpb.GithubReaction.created:type_name -> google.protobuf.Timestamp
-	18, // 51: maintpb.GitMutation.repo:type_name -> maintpb.GitRepo
-	19, // 52: maintpb.GitMutation.commit:type_name -> maintpb.GitCommit
-	24, // 53: maintpb.GitMutation.ref_update:type_name -> maintpb.GitRef
-	22, // 54: maintpb.GitMutation.tag:type_name -> maintpb.GitTag
-	20, // 55: maintpb.GitCommit.diff_tree:type_name -> maintpb.GitDiffTree
-	21, // 56: maintpb.GitDiffTree.file:type_name -> maintpb.GitDiffTreeFile
-	19, // 57: maintpb.GerritMutation.commits:type_name -> maintpb.GitCommit
-	24, // 58: maintpb.GerritMutation.refs:type_name -> maintpb.GitRef
-	26, // 59: maintpb.GithubProjectMutation.status_options:type_name -> maintpb.GithubProjectStatusOption
-	3,  // 60: maintpb.GithubProjectMutation.closed:type_name -> maintpb.BoolChange
-	27, // 61: maintpb.GithubProjectMutation.fields:type_name -> maintpb.GithubProjectField
-	26, // 62: maintpb.GithubProjectField.options:type_name -> maintpb.GithubProjectStatusOption
-	28, // 63: maintpb.GithubProjectField.iterations:type_name -> maintpb.GithubProjectIteration
-	36, // 64: maintpb.GithubIssueProjectItem.updated_at:type_name -> google.protobuf.Timestamp
-	30, // 65: maintpb.GithubIssueProjectItem.field_values:type_name -> maintpb.GithubProjectItemFieldValue
-	36, // 66: maintpb.GithubProjectEvent.created:type_name -> google.protobuf.Timestamp
-	33, // 67: maintpb.GithubActionsMutation.run:type_name -> maintpb.GithubWorkflowRun
-	34, // 68: maintpb.GithubActionsMutation.job:type_name -> maintpb.GithubWorkflowJob
-	36, // 69: maintpb.GithubWorkflowRun.created:type_name -> google.protobuf.Timestamp
-	36, // 70: maintpb.GithubWorkflowRun.updated:type_name -> google.protobuf.Timestamp
-	36, // 71: maintpb.GithubWorkflowRun.run_started:type_name -> google.protobuf.Timestamp
-	36, // 72: maintpb.GithubWorkflowJob.started:type_name -> google.protobuf.Timestamp
-	36, // 73: maintpb.GithubWorkflowJob.completed:type_name -> google.protobuf.Timestamp
-	35, // 74: maintpb.GithubWorkflowJob.step:type_name -> maintpb.GithubWorkflowStep
-	36, // 75: maintpb.GithubWorkflowStep.started:type_name -> google.protobuf.Timestamp
-	36, // 76: maintpb.GithubWorkflowStep.completed:type_name -> google.protobuf.Timestamp
-	77, // [77:77] is the sub-list for method output_type
-	77, // [77:77] is the sub-list for method input_type
-	77, // [77:77] is the sub-list for extension type_name
-	77, // [77:77] is the sub-list for extension extendee
-	0,  // [0:77] is the sub-list for field type_name
+	31, // 37: maintpb.GithubIssueMutation.issue_field:type_name -> maintpb.GithubIssueFieldValue
+	3,  // 38: maintpb.GithubMilestone.closed:type_name -> maintpb.BoolChange
+	37, // 39: maintpb.GithubIssueEvent.created:type_name -> google.protobuf.Timestamp
+	5,  // 40: maintpb.GithubIssueEvent.label:type_name -> maintpb.GithubLabel
+	6,  // 41: maintpb.GithubIssueEvent.milestone:type_name -> maintpb.GithubMilestone
+	9,  // 42: maintpb.GithubIssueEvent.commit:type_name -> maintpb.GithubCommit
+	15, // 43: maintpb.GithubIssueEvent.team_reviewer:type_name -> maintpb.GithubTeam
+	8,  // 44: maintpb.GithubIssueEvent.dismissed_review:type_name -> maintpb.GithubDismissedReviewEvent
+	37, // 45: maintpb.GithubReview.created:type_name -> google.protobuf.Timestamp
+	37, // 46: maintpb.GithubIssueSyncStatus.server_date:type_name -> google.protobuf.Timestamp
+	13, // 47: maintpb.GithubIssueCommentMutation.user:type_name -> maintpb.GithubUser
+	37, // 48: maintpb.GithubIssueCommentMutation.created:type_name -> google.protobuf.Timestamp
+	37, // 49: maintpb.GithubIssueCommentMutation.updated:type_name -> google.protobuf.Timestamp
+	14, // 50: maintpb.GithubIssueCommentMutation.reaction:type_name -> maintpb.GithubReaction
+	37, // 51: maintpb.GithubReaction.created:type_name -> google.protobuf.Timestamp
+	18, // 52: maintpb.GitMutation.repo:type_name -> maintpb.GitRepo
+	19, // 53: maintpb.GitMutation.commit:type_name -> maintpb.GitCommit
+	24, // 54: maintpb.GitMutation.ref_update:type_name -> maintpb.GitRef
+	22, // 55: maintpb.GitMutation.tag:type_name -> maintpb.GitTag
+	20, // 56: maintpb.GitCommit.diff_tree:type_name -> maintpb.GitDiffTree
+	21, // 57: maintpb.GitDiffTree.file:type_name -> maintpb.GitDiffTreeFile
+	19, // 58: maintpb.GerritMutation.commits:type_name -> maintpb.GitCommit
+	24, // 59: maintpb.GerritMutation.refs:type_name -> maintpb.GitRef
+	26, // 60: maintpb.GithubProjectMutation.status_options:type_name -> maintpb.GithubProjectStatusOption
+	3,  // 61: maintpb.GithubProjectMutation.closed:type_name -> maintpb.BoolChange
+	27, // 62: maintpb.GithubProjectMutation.fields:type_name -> maintpb.GithubProjectField
+	26, // 63: maintpb.GithubProjectField.options:type_name -> maintpb.GithubProjectStatusOption
+	28, // 64: maintpb.GithubProjectField.iterations:type_name -> maintpb.GithubProjectIteration
+	37, // 65: maintpb.GithubIssueProjectItem.updated_at:type_name -> google.protobuf.Timestamp
+	30, // 66: maintpb.GithubIssueProjectItem.field_values:type_name -> maintpb.GithubProjectItemFieldValue
+	37, // 67: maintpb.GithubProjectEvent.created:type_name -> google.protobuf.Timestamp
+	34, // 68: maintpb.GithubActionsMutation.run:type_name -> maintpb.GithubWorkflowRun
+	35, // 69: maintpb.GithubActionsMutation.job:type_name -> maintpb.GithubWorkflowJob
+	37, // 70: maintpb.GithubWorkflowRun.created:type_name -> google.protobuf.Timestamp
+	37, // 71: maintpb.GithubWorkflowRun.updated:type_name -> google.protobuf.Timestamp
+	37, // 72: maintpb.GithubWorkflowRun.run_started:type_name -> google.protobuf.Timestamp
+	37, // 73: maintpb.GithubWorkflowJob.started:type_name -> google.protobuf.Timestamp
+	37, // 74: maintpb.GithubWorkflowJob.completed:type_name -> google.protobuf.Timestamp
+	36, // 75: maintpb.GithubWorkflowJob.step:type_name -> maintpb.GithubWorkflowStep
+	37, // 76: maintpb.GithubWorkflowStep.started:type_name -> google.protobuf.Timestamp
+	37, // 77: maintpb.GithubWorkflowStep.completed:type_name -> google.protobuf.Timestamp
+	78, // [78:78] is the sub-list for method output_type
+	78, // [78:78] is the sub-list for method input_type
+	78, // [78:78] is the sub-list for extension type_name
+	78, // [78:78] is the sub-list for extension extendee
+	0,  // [0:78] is the sub-list for field type_name
 }
 
 func init() { file_maintner_proto_init() }
@@ -3623,7 +3708,7 @@ func file_maintner_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_maintner_proto_rawDesc), len(file_maintner_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   36,
+			NumMessages:   37,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

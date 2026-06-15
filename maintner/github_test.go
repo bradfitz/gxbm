@@ -2265,6 +2265,93 @@ func TestProcessMutation_IssueType(t *testing.T) {
 	}
 }
 
+func TestProcessMutation_IssueFields(t *testing.T) {
+	c := new(Corpus)
+
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "tailscale",
+			Repo:   "tailscale",
+			Number: 10,
+			User:   &maintpb.GithubUser{Id: 1},
+		},
+	})
+
+	gi := c.github.repos[GitHubRepoID{"tailscale", "tailscale"}].issues[10]
+	if gi.IssueFields != nil {
+		t.Errorf("IssueFields = %v, want nil", gi.IssueFields)
+	}
+
+	// Set a snapshot of fields.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:             "tailscale",
+			Repo:              "tailscale",
+			Number:            10,
+			IssueFieldsSynced: true,
+			IssueField: []*maintpb.GithubIssueFieldValue{
+				{FieldName: "Color", Value: "Green"},
+				{FieldName: "Size", Value: "Large"},
+				{FieldName: "Shape", Value: "Square"},
+			},
+		},
+	})
+	if got, want := gi.IssueFieldValue("Color"), "Green"; got != want {
+		t.Errorf("Color = %q, want %q", got, want)
+	}
+	if got, want := gi.IssueFieldValue("Shape"), "Square"; got != want {
+		t.Errorf("Shape = %q, want %q", got, want)
+	}
+
+	// A mutation that doesn't touch issue fields must not clear them.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "tailscale",
+			Repo:   "tailscale",
+			Number: 10,
+		},
+	})
+	if got, want := gi.IssueFieldValue("Color"), "Green"; got != want {
+		t.Errorf("Color = %q after no-op mutation, want %q (should not be cleared)", got, want)
+	}
+
+	// A new snapshot replaces wholesale: Size and Shape dropped, Weight added.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:             "tailscale",
+			Repo:              "tailscale",
+			Number:            10,
+			IssueFieldsSynced: true,
+			IssueField: []*maintpb.GithubIssueFieldValue{
+				{FieldName: "Color", Value: "Blue"},
+				{FieldName: "Weight", Value: "Heavy"},
+			},
+		},
+	})
+	if got, want := gi.IssueFieldValue("Color"), "Blue"; got != want {
+		t.Errorf("Color = %q, want %q", got, want)
+	}
+	if got, want := gi.IssueFieldValue("Weight"), "Heavy"; got != want {
+		t.Errorf("Weight = %q, want %q", got, want)
+	}
+	if got := gi.IssueFieldValue("Size"); got != "" {
+		t.Errorf("Size = %q, want empty (dropped by new snapshot)", got)
+	}
+
+	// An empty synced snapshot clears all fields.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:             "tailscale",
+			Repo:              "tailscale",
+			Number:            10,
+			IssueFieldsSynced: true,
+		},
+	})
+	if gi.IssueFields != nil {
+		t.Errorf("IssueFields = %v after empty synced snapshot, want nil", gi.IssueFields)
+	}
+}
+
 func TestFieldValuesChanged(t *testing.T) {
 	existing := &GitHubIssueProjectItem{
 		fieldValues: map[string]projectFieldValue{
@@ -2838,6 +2925,60 @@ func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
+// TestSyncProjectsForIssue_IssueFieldsTruncated verifies that when the
+// issueFieldValues connection is paginated (hasNextPage=true), the sync skips
+// the issue-fields snapshot rather than persisting a truncated, authoritative
+// set that would wholesale-delete the overflow from the corpus.
+func TestSyncProjectsForIssue_IssueFieldsTruncated(t *testing.T) {
+	const responseJSON = `{
+  "data": {
+    "repository": {
+      "issueOrPullRequest": {
+        "issueFieldValues": {
+          "pageInfo": { "hasNextPage": true },
+          "nodes": [
+            { "__typename": "IssueFieldSingleSelectValue", "field": {"name": "Priority"}, "value": "P9" }
+          ]
+        },
+        "projectItems": { "nodes": [] },
+        "timelineItems": { "nodes": [] }
+      }
+    }
+  }
+}`
+
+	hc := &http.Client{Transport: &graphqlRoundTripper{body: []byte(responseJSON)}}
+	c := new(Corpus)
+
+	// Pre-seed the issue with an existing issue-fields snapshot.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:             "tailscale",
+			Repo:              "corp",
+			Number:            100,
+			User:              &maintpb.GithubUser{Id: 1},
+			IssueFieldsSynced: true,
+			IssueField: []*maintpb.GithubIssueFieldValue{
+				{FieldName: "Color", Value: "Green"},
+			},
+		},
+	})
+
+	if err := c.SyncProjectsForIssue(context.Background(), hc, "tailscale", "corp", 100); err != nil {
+		t.Fatalf("SyncProjectsForIssue: %v", err)
+	}
+
+	gi := c.github.repos[GitHubRepoID{"tailscale", "corp"}].issues[100]
+	// The truncated response must neither clobber the existing snapshot...
+	if got, want := gi.IssueFieldValue("Color"), "Green"; got != want {
+		t.Errorf("Color = %q, want %q (truncated sync must not overwrite existing fields)", got, want)
+	}
+	// ...nor apply the partial node it did return.
+	if got := gi.IssueFieldValue("Priority"); got != "" {
+		t.Errorf("Priority = %q, want empty (truncated nodes must not be applied)", got)
+	}
+}
+
 // TestSyncProjectsForIssue is an integration test that calls the real GitHub
 // GraphQL API and verifies that FieldValues and IssueType are populated in the
 // corpus after a sync.
@@ -2899,6 +3040,10 @@ func TestSyncProjectsForIssue(t *testing.T) {
 	gi := gr.issues[int32(issueNum)]
 
 	t.Logf("IssueType: %q", gi.IssueType)
+	t.Logf("issue fields: %d", len(gi.IssueFields))
+	for name, val := range gi.IssueFields {
+		t.Logf("  %s = %q", name, val)
+	}
 	t.Logf("project items: %d", len(gi.projectItems))
 	for projID, item := range gi.projectItems {
 		proj := c.github.projects[projID]

@@ -14,6 +14,7 @@ import (
 	"io"
 	"iter"
 	"log"
+	"maps"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -387,11 +388,25 @@ type GitHubIssue struct {
 	projectEventsSyncedAsOf time.Time
 
 	IssueType string // native GitHub issue type name, e.g. "Bug", "Feature"; "" for PRs or unset
+
+	// IssueFields holds GitHub's org-level "Issue fields" (a distinct feature
+	// from Projects V2 fields) by field name -> display value. nil if the issue
+	// has no fields set (or they have not been synced yet).
+	IssueFields map[string]string
 }
 
 // IsPullRequest reports whether the issue is a pull request.
 func (gi *GitHubIssue) IsPullRequest() bool {
 	return gi != nil && gi.PullRequest != nil
+}
+
+// IssueFieldValue returns the display value of the named org-level GitHub
+// "Issue field", or "" if the field is unset.
+func (gi *GitHubIssue) IssueFieldValue(name string) string {
+	if gi == nil {
+		return ""
+	}
+	return gi.IssueFields[name]
 }
 
 // GitHubPullRequest holds PR-specific metadata for a GitHub pull request.
@@ -2229,6 +2244,18 @@ func (c *Corpus) processGithubIssueMutation(m *maintpb.GithubIssueMutation) {
 
 	if m.IssueType != "" {
 		gi.IssueType = m.IssueType
+	}
+
+	if m.IssueFieldsSynced {
+		// IssueField is a full snapshot; replace wholesale (nil when cleared).
+		if len(m.IssueField) == 0 {
+			gi.IssueFields = nil
+		} else {
+			gi.IssueFields = make(map[string]string, len(m.IssueField))
+			for _, fv := range m.IssueField {
+				gi.IssueFields[fv.FieldName] = fv.Value
+			}
+		}
 	}
 
 	for _, pe := range m.ProjectEvent {
@@ -5024,7 +5051,48 @@ func (p *githubRepoPoller) syncProjectsForIssue(ctx context.Context, issueNum in
 		}
 	}
 
-	if len(mut.ProjectItem) == 0 && len(mut.RemovedProjectItemId) == 0 && len(mut.ProjectEvent) == 0 && mut.IssueType == "" {
+	// Org-level issue fields. Build the full current set and, if it differs
+	// from the corpus, emit it as a snapshot (IssueFieldsSynced marks it
+	// authoritative, including the all-cleared case where the snapshot is empty).
+	//
+	// If GitHub paginated (>100 fields on one issue), skip rather than persist a
+	// truncated snapshot: because the snapshot is authoritative, a partial set
+	// would wholesale-delete the overflow fields from the corpus.
+	if issueData.IssueFieldValues.PageInfo.HasNextPage {
+		p.c.logf("maintner: %s/%s#%d has >100 issue fields; skipping issue-field sync to avoid a truncated snapshot", owner, repo, issueNum)
+	} else {
+		newIssueFields := make(map[string]string)
+		for _, fv := range issueData.IssueFieldValues.Nodes {
+			name := fv.Field.Name
+			if name == "" {
+				continue
+			}
+			val := fv.Value
+			if val == "" && fv.NumberValue != nil {
+				val = strconv.FormatFloat(*fv.NumberValue, 'f', -1, 64)
+			}
+			newIssueFields[name] = val
+		}
+		p.c.mu.RLock()
+		issueFieldsChanged := !maps.Equal(gi.IssueFields, newIssueFields)
+		p.c.mu.RUnlock()
+		if issueFieldsChanged {
+			mut.IssueFieldsSynced = true
+			names := make([]string, 0, len(newIssueFields))
+			for name := range newIssueFields {
+				names = append(names, name)
+			}
+			sort.Strings(names) // deterministic mutation ordering
+			for _, name := range names {
+				mut.IssueField = append(mut.IssueField, &maintpb.GithubIssueFieldValue{
+					FieldName: name,
+					Value:     newIssueFields[name],
+				})
+			}
+		}
+	}
+
+	if len(mut.ProjectItem) == 0 && len(mut.RemovedProjectItemId) == 0 && len(mut.ProjectEvent) == 0 && mut.IssueType == "" && !mut.IssueFieldsSynced {
 		return nil // nothing changed
 	}
 
@@ -5187,6 +5255,25 @@ type projectIssueData struct {
 	IssueType struct {
 		Name string `json:"name"`
 	} `json:"issueType"`
+	IssueFieldValues struct {
+		PageInfo struct {
+			HasNextPage bool `json:"hasNextPage"`
+		} `json:"pageInfo"`
+		Nodes []gqlIssueFieldValue `json:"nodes"`
+	} `json:"issueFieldValues"`
+}
+
+// gqlIssueFieldValue is one org-level issue field value node. The field name is
+// flattened from the IssueFieldValueCommon.field selection, and the display
+// value from the concrete value type (numberValue is aliased for number fields,
+// which expose a Float rather than a String).
+type gqlIssueFieldValue struct {
+	TypeName string `json:"__typename"`
+	Field    struct {
+		Name string `json:"name"`
+	} `json:"field"`
+	Value       string   `json:"value"`       // single-select/text/date/multi-select display value
+	NumberValue *float64 `json:"numberValue"` // number fields
 }
 
 type gqlProjectItem struct {
@@ -5388,13 +5475,36 @@ const projectItemsFragment = `
         }
 `
 
+// issueFieldValuesFragment fetches an issue's org-level "Issue fields" values
+// (GitHub's structured issue metadata, distinct from Projects V2 fields). Each
+// value carries its field via the IssueFieldValueCommon interface and its
+// display value via the concrete value type. Issue fields apply to issues only,
+// not pull requests.
+// first: 100 is GitHub's max connection page size; issues realistically have
+// only a handful of fields. hasNextPage lets the caller detect the (effectively
+// impossible) overflow and skip persisting a truncated snapshot.
+const issueFieldValuesFragment = `
+        issueFieldValues(first: 100) {
+          pageInfo { hasNextPage }
+          nodes {
+            __typename
+            ... on IssueFieldValueCommon { field { ... on IssueFieldCommon { name } } }
+            ... on IssueFieldSingleSelectValue { value }
+            ... on IssueFieldTextValue { value }
+            ... on IssueFieldDateValue { value }
+            ... on IssueFieldMultiSelectValue { value }  # value is the comma-joined names of the selected options
+            ... on IssueFieldNumberValue { numberValue: value }
+          }
+        }
+`
+
 var projectsForIssueQuery = `
 query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     issueOrPullRequest(number: $number) {
       ... on Issue {
         issueType { name }
-` + projectItemsFragment + `
+` + issueFieldValuesFragment + projectItemsFragment + `
       }
       ... on PullRequest {
 ` + projectItemsFragment + `

@@ -112,7 +112,15 @@ message GithubIssueMutation {
   // Empty for pull requests or issues with no type set.
   string issue_type = 48;
 
-  // Next tag: 49
+  // Org-level "Issue fields" (GitHub's structured issue metadata, distinct from
+  // Projects V2 fields). issue_field carries the full current set as a snapshot
+  // whenever any value changes; issue_fields_synced marks that snapshot
+  // authoritative (including the all-cleared case where issue_field is empty),
+  // distinguishing it from a mutation that simply doesn't touch issue fields.
+  repeated GithubIssueFieldValue issue_field = 49;
+  bool issue_fields_synced = 50;
+
+  // Next tag: 51
 }
 
 // BoolChange represents a change to a boolean value.
@@ -430,6 +438,14 @@ message GithubProjectItemFieldValue {
     double number_value = 5;                   // for number fields
     string date_value = 6;                     // "YYYY-MM-DD" for date fields
   }
+}
+
+// GithubIssueFieldValue records one org-level "Issue field" value on an issue.
+// These are GitHub's structured issue metadata, distinct from Projects V2
+// fields. The value is the field's display string.
+message GithubIssueFieldValue {
+  string field_name = 1;   // the issue field's name
+  string value = 2;        // the field's display value
 }
 
 // GithubProjectEvent is a project-related timeline event on an issue

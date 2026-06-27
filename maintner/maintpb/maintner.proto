@@ -120,7 +120,15 @@ message GithubIssueMutation {
   repeated GithubIssueFieldValue issue_field = 49;
   bool issue_fields_synced = 50;
 
-  // Next tag: 51
+  // meta_changed_date is the observation time (server Date of the GraphQL
+  // response) at which a snapshot-style metadata change was detected: an
+  // org-level issue_field change or an issue_type change. GitHub exposes no
+  // authoritative "changed at" time for these and they don't bump the issue's
+  // updated field, so this approximate, sync-cadence-bounded timestamp lets
+  // GitHubIssue.LastModified account for them.
+  google.protobuf.Timestamp meta_changed_date = 51;
+
+  // Next tag: 52
 }
 
 // BoolChange represents a change to a boolean value.

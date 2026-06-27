@@ -3059,3 +3059,99 @@ func TestSyncProjectsForIssue(t *testing.T) {
 		}
 	}
 }
+
+// TestGitHubIssue_LastModified verifies that LastModified advances for every
+// kind of activity it's meant to track — comments, events, project-board
+// events, Projects V2 item field-value/Status changes, and org-level
+// issue-field/issue-type edits — and that reactions deliberately do NOT advance
+// it.
+func TestGitHubIssue_LastModified(t *testing.T) {
+	base := t1
+	at := func(h int) time.Time { return base.Add(time.Duration(h) * time.Hour) }
+
+	c := new(Corpus)
+	repo := GitHubRepoID{"tailscale", "tailscale"}
+	const num = 42
+
+	apply := func(m *maintpb.GithubIssueMutation) {
+		m.Owner, m.Repo, m.Number = repo.Owner, repo.Repo, num
+		c.processMutationLocked(&maintpb.Mutation{GithubIssue: m})
+	}
+	issue := func() *GitHubIssue { return c.github.repos[repo].issues[num] }
+	wantLM := func(step string, want time.Time) {
+		t.Helper()
+		if got := issue().LastModified(); !got.Equal(want) {
+			t.Errorf("after %s: LastModified = %v; want %v", step, got, want)
+		}
+	}
+
+	// 1. New issue. LastModified == Updated.
+	apply(&maintpb.GithubIssueMutation{
+		User:    &maintpb.GithubUser{Id: 1, Login: "author"},
+		Created: timestamppb.New(base),
+		Updated: timestamppb.New(at(1)),
+	})
+	wantLM("create", at(1))
+
+	// 2. A comment edited later advances LastModified (commentsUpdatedTil).
+	apply(&maintpb.GithubIssueMutation{
+		Comment: []*maintpb.GithubIssueCommentMutation{{
+			Id:      100,
+			User:    &maintpb.GithubUser{Id: 1, Login: "author"},
+			Created: timestamppb.New(at(1)),
+			Updated: timestamppb.New(at(2)),
+		}},
+	})
+	wantLM("comment", at(2))
+
+	// 3. A timeline event advances it (eventMaxTime).
+	apply(&maintpb.GithubIssueMutation{
+		Event: []*maintpb.GithubIssueEvent{{
+			Id:        200,
+			EventType: "labeled",
+			Created:   timestamppb.New(at(3)),
+		}},
+	})
+	wantLM("event", at(3))
+
+	// 4. A project-board event advances it (blind spot #2).
+	apply(&maintpb.GithubIssueMutation{
+		ProjectEvent: []*maintpb.GithubProjectEvent{{
+			Id:            "PE_1",
+			EventType:     "status_changed",
+			ProjectNodeId: "PVT_abc",
+			Created:       timestamppb.New(at(4)),
+		}},
+	})
+	wantLM("project event", at(4))
+
+	// 5. A Projects V2 item field-value/Status change advances it (blind spot #3).
+	apply(&maintpb.GithubIssueMutation{
+		ProjectItem: []*maintpb.GithubIssueProjectItem{{
+			ProjectNodeId: "PVT_abc",
+			ItemNodeId:    "PVTI_1",
+			UpdatedAt:     timestamppb.New(at(5)),
+		}},
+	})
+	wantLM("project item", at(5))
+
+	// 6. An org-level issue-field edit advances it via the observation
+	//    timestamp (blind spot #1).
+	apply(&maintpb.GithubIssueMutation{
+		IssueFieldsSynced: true,
+		IssueField:        []*maintpb.GithubIssueFieldValue{{FieldName: "Priority", Value: "P1"}},
+		MetaChangedDate:   timestamppb.New(at(6)),
+	})
+	wantLM("issue field", at(6))
+
+	// 7. A reaction created later must NOT advance LastModified.
+	apply(&maintpb.GithubIssueMutation{
+		Reaction: []*maintpb.GithubReaction{{
+			Id:      300,
+			UserId:  2,
+			Content: "+1",
+			Created: timestamppb.New(at(7)),
+		}},
+	})
+	wantLM("reaction (excluded)", at(6))
+}

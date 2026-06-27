@@ -387,6 +387,13 @@ type GitHubIssue struct {
 	projectsSyncedAsOf      time.Time
 	projectEventsSyncedAsOf time.Time
 
+	// metaChangedAt is the observation time at which a snapshot-style metadata
+	// change (org-level IssueFields or IssueType) was last detected. GitHub
+	// gives no authoritative change time for these and they don't bump Updated,
+	// so this approximate timestamp feeds LastModified. See the meta_changed_date
+	// proto field.
+	metaChangedAt time.Time
+
 	IssueType string // native GitHub issue type name, e.g. "Bug", "Feature"; "" for PRs or unset
 
 	// IssueFields holds GitHub's org-level "Issue fields" (a distinct feature
@@ -765,11 +772,27 @@ func (gi *GitHubIssue) ForeachProjectEvent(fn func(*GitHubProjectEvent) error) e
 	return nil
 }
 
-// LastModified reports the most recent time that any known metadata was updated.
-// In contrast to the Updated field, LastModified includes comments and events.
+// LastModified reports the most recent time that any known activity occurred on
+// the issue. In contrast to the Updated field (GitHub's REST updated_at, which
+// misses several kinds of activity), LastModified is the max of:
 //
-// TODO(bradfitz): this seems to not be working, at least events
-// aren't updating it. Investigate.
+//   - Updated: issue text/labels/assignees/milestone/state changes;
+//   - commentsUpdatedTil: comment additions and edits;
+//   - eventMaxTime: timeline events, reviews, project-board events, and
+//     Projects V2 item field-value/Status changes;
+//   - metaChangedAt: org-level Issue-field and IssueType edits (observation
+//     time; see metaChangedAt).
+//
+// Reactions are deliberately excluded (a lone emoji shouldn't count as activity).
+//
+// Known limitation: timeline-only events that GitHub's REST issues/events
+// endpoint omits — cross-referenced, connected/disconnected, marked_as_duplicate,
+// transferred, pinned, converted_to_draft, ready_for_review, and sub-issue
+// add/remove — are not synced and so do not advance LastModified.
+//
+// The result is a lower bound: it is exact only once an issue's sub-resources
+// have been synced (see commentsSynced/eventsSynced/...). Updated is always the
+// floor.
 func (gi *GitHubIssue) LastModified() time.Time {
 	ret := gi.Updated
 	if gi.commentsUpdatedTil.After(ret) {
@@ -777,6 +800,9 @@ func (gi *GitHubIssue) LastModified() time.Time {
 	}
 	if gi.eventMaxTime.After(ret) {
 		ret = gi.eventMaxTime
+	}
+	if gi.metaChangedAt.After(ret) {
+		ret = gi.metaChangedAt
 	}
 	return ret
 }
@@ -2126,6 +2152,15 @@ func (c *Corpus) processGithubIssueMutation(m *maintpb.GithubIssueMutation) {
 		if cmut.Updated != nil {
 			gc.Updated = cmut.Updated.AsTime().UTC()
 		}
+		// Track the high-water mark of comment activity, both to feed
+		// LastModified and to serve as the incremental "since" cursor for
+		// comment syncing (see syncCommentsOnIssue).
+		if gc.Created.After(gi.commentsUpdatedTil) {
+			gi.commentsUpdatedTil = gc.Created
+		}
+		if gc.Updated.After(gi.commentsUpdatedTil) {
+			gi.commentsUpdatedTil = gc.Updated
+		}
 		if cmut.Body != "" {
 			gc.Body = cmut.Body
 		}
@@ -2218,6 +2253,12 @@ func (c *Corpus) processGithubIssueMutation(m *maintpb.GithubIssueMutation) {
 		}
 		if pitem.UpdatedAt != nil {
 			item.UpdatedAt = pitem.UpdatedAt.AsTime()
+			// A project item's UpdatedAt advances on Status-column moves and
+			// project-scoped field edits, which don't bump the issue's REST
+			// updated_at. Fold it into eventMaxTime so LastModified sees it.
+			if item.UpdatedAt.After(gi.eventMaxTime) {
+				gi.eventMaxTime = item.UpdatedAt
+			}
 		}
 		if len(pitem.FieldValues) > 0 {
 			item.fieldValues = make(map[string]projectFieldValue, len(pitem.FieldValues))
@@ -2258,6 +2299,15 @@ func (c *Corpus) processGithubIssueMutation(m *maintpb.GithubIssueMutation) {
 		}
 	}
 
+	// Observation time for snapshot-style metadata changes (IssueFields and
+	// IssueType). These carry no GitHub change timestamp and don't bump Updated,
+	// so this lets LastModified account for them.
+	if m.MetaChangedDate != nil {
+		if t := m.MetaChangedDate.AsTime(); t.After(gi.metaChangedAt) {
+			gi.metaChangedAt = t
+		}
+	}
+
 	for _, pe := range m.ProjectEvent {
 		if pe.Id == "" {
 			continue
@@ -2278,6 +2328,13 @@ func (c *Corpus) processGithubIssueMutation(m *maintpb.GithubIssueMutation) {
 		}
 		if pe.Created != nil {
 			ev.Created = pe.Created.AsTime()
+			// Project-board events (added/removed/status-changed) don't bump
+			// the issue's REST updated_at; fold into eventMaxTime so they
+			// count as activity. (The reviews fold-in above does not cover
+			// these — they're a separate mutation kind.)
+			if ev.Created.After(gi.eventMaxTime) {
+				gi.eventMaxTime = ev.Created
+			}
 		}
 		gi.projectEvents[pe.Id] = ev
 	}
@@ -3763,28 +3820,35 @@ func (p *githubRepoPoller) syncCommentsOnIssue(ctx context.Context, issueNum int
 
 // graphqlRequest performs a GitHub GraphQL API request using the poller's
 // authenticated HTTP client.
-func (p *githubRepoPoller) graphqlRequest(ctx context.Context, query string, variables map[string]any, result any) error {
+// graphqlRequest issues a GraphQL query and unmarshals the "data" payload into
+// result. It also returns the server's Date header (UTC), which callers use as
+// an observation timestamp for data that carries no GitHub change time. The
+// returned time is zero if the header is missing or unparseable.
+func (p *githubRepoPoller) graphqlRequest(ctx context.Context, query string, variables map[string]any, result any) (serverDate time.Time, err error) {
 	body := struct {
 		Query     string         `json:"query"`
 		Variables map[string]any `json:"variables,omitempty"`
 	}{query, variables}
 	bodyJSON, err := json.Marshal(body)
 	if err != nil {
-		return err
+		return time.Time{}, err
 	}
 	req, err := http.NewRequestWithContext(ctx, "POST", "https://api.github.com/graphql", bytes.NewReader(bodyJSON))
 	if err != nil {
-		return err
+		return time.Time{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return err
+		return time.Time{}, err
 	}
 	defer resp.Body.Close()
+	if d, err := http.ParseTime(resp.Header.Get("Date")); err == nil {
+		serverDate = d.UTC()
+	}
 	if resp.StatusCode != 200 {
 		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("graphql: HTTP %d: %s", resp.StatusCode, respBody)
+		return serverDate, fmt.Errorf("graphql: HTTP %d: %s", resp.StatusCode, respBody)
 	}
 	var gqlResp struct {
 		Data   json.RawMessage `json:"data"`
@@ -3793,15 +3857,15 @@ func (p *githubRepoPoller) graphqlRequest(ctx context.Context, query string, var
 		} `json:"errors"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&gqlResp); err != nil {
-		return fmt.Errorf("graphql: decoding response: %w", err)
+		return serverDate, fmt.Errorf("graphql: decoding response: %w", err)
 	}
 	if len(gqlResp.Errors) > 0 && len(gqlResp.Data) == 0 {
-		return fmt.Errorf("graphql: %s", gqlResp.Errors[0].Message)
+		return serverDate, fmt.Errorf("graphql: %s", gqlResp.Errors[0].Message)
 	}
 	if len(gqlResp.Data) == 0 {
-		return fmt.Errorf("graphql: no data in response")
+		return serverDate, fmt.Errorf("graphql: no data in response")
 	}
-	return json.Unmarshal(gqlResp.Data, result)
+	return serverDate, json.Unmarshal(gqlResp.Data, result)
 }
 
 // reactionScanBatchSize is how many issues to check per GraphQL request
@@ -3961,7 +4025,7 @@ func (p *githubRepoPoller) checkReactionCountsBatch(ctx context.Context, issueNu
 	var result struct {
 		Repository map[string]json.RawMessage `json:"repository"`
 	}
-	if err := p.graphqlRequest(ctx, qb.String(), vars, &result); err != nil {
+	if _, err := p.graphqlRequest(ctx, qb.String(), vars, &result); err != nil {
 		return nil, fmt.Errorf("reaction count batch check: %w", err)
 	}
 
@@ -4891,11 +4955,12 @@ func (p *githubRepoPoller) syncProjectsForIssue(ctx context.Context, issueNum in
 			IssueOrPullRequest json.RawMessage `json:"issueOrPullRequest"`
 		} `json:"repository"`
 	}
-	if err := p.graphqlRequest(ctx, projectsForIssueQuery, map[string]any{
+	serverDate, err := p.graphqlRequest(ctx, projectsForIssueQuery, map[string]any{
 		"owner":  owner,
 		"name":   repo,
 		"number": issueNum,
-	}, &result); err != nil {
+	}, &result)
+	if err != nil {
 		return fmt.Errorf("syncProjectsForIssue %d: %w", issueNum, err)
 	}
 
@@ -5104,6 +5169,14 @@ func (p *githubRepoPoller) syncProjectsForIssue(ctx context.Context, issueNum in
 	}
 	if !maxEventTime.IsZero() {
 		mut.ProjectEventStatus = &maintpb.GithubIssueSyncStatus{ServerDate: timestamppb.New(maxEventTime)}
+	}
+
+	// Org-level issue fields and issue type carry no GitHub change timestamp and
+	// don't bump the issue's updated_at. Stamp snapshot changes to these with the
+	// GraphQL response's server Date as an observation time, so LastModified can
+	// account for them. (Project item/event changes already carry real times.)
+	if (mut.IssueFieldsSynced || mut.IssueType != "") && !serverDate.IsZero() {
+		mut.MetaChangedDate = timestamppb.New(serverDate)
 	}
 
 	p.c.addMutation(&maintpb.Mutation{GithubIssue: &mut})
@@ -5546,7 +5619,7 @@ func (p *githubRepoPoller) resolveContentNodeID(ctx context.Context, nodeID stri
 			} `json:"repository"`
 		} `json:"node"`
 	}
-	if err := p.graphqlRequest(ctx, resolveNodeQuery, map[string]any{
+	if _, err := p.graphqlRequest(ctx, resolveNodeQuery, map[string]any{
 		"id": nodeID,
 	}, &result); err != nil {
 		return "", "", 0, err

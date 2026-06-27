@@ -253,8 +253,15 @@ type GithubIssueMutation struct {
 	// distinguishing it from a mutation that simply doesn't touch issue fields.
 	IssueField        []*GithubIssueFieldValue `protobuf:"bytes,49,rep,name=issue_field,json=issueField,proto3" json:"issue_field,omitempty"`
 	IssueFieldsSynced bool                     `protobuf:"varint,50,opt,name=issue_fields_synced,json=issueFieldsSynced,proto3" json:"issue_fields_synced,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// meta_changed_date is the observation time (server Date of the GraphQL
+	// response) at which a snapshot-style metadata change was detected: an
+	// org-level issue_field change or an issue_type change. GitHub exposes no
+	// authoritative "changed at" time for these and they don't bump the issue's
+	// updated field, so this approximate, sync-cadence-bounded timestamp lets
+	// GitHubIssue.LastModified account for them.
+	MetaChangedDate *timestamppb.Timestamp `protobuf:"bytes,51,opt,name=meta_changed_date,json=metaChangedDate,proto3" json:"meta_changed_date,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *GithubIssueMutation) Reset() {
@@ -628,6 +635,13 @@ func (x *GithubIssueMutation) GetIssueFieldsSynced() bool {
 		return x.IssueFieldsSynced
 	}
 	return false
+}
+
+func (x *GithubIssueMutation) GetMetaChangedDate() *timestamppb.Timestamp {
+	if x != nil {
+		return x.MetaChangedDate
+	}
+	return nil
 }
 
 // BoolChange represents a change to a boolean value.
@@ -3267,7 +3281,7 @@ const file_maintner_proto_rawDesc = "" +
 	"\x06labels\x18\x03 \x03(\v2\x14.maintpb.GithubLabelR\x06labels\x128\n" +
 	"\n" +
 	"milestones\x18\x04 \x03(\v2\x18.maintpb.GithubMilestoneR\n" +
-	"milestones\"\xd4\x12\n" +
+	"milestones\"\x9c\x13\n" +
 	"\x13GithubIssueMutation\x12\x14\n" +
 	"\x05owner\x18\x01 \x01(\tR\x05owner\x12\x12\n" +
 	"\x04repo\x18\x02 \x01(\tR\x04repo\x12\x16\n" +
@@ -3321,7 +3335,8 @@ const file_maintner_proto_rawDesc = "" +
 	"issue_type\x180 \x01(\tR\tissueType\x12?\n" +
 	"\vissue_field\x181 \x03(\v2\x1e.maintpb.GithubIssueFieldValueR\n" +
 	"issueField\x12.\n" +
-	"\x13issue_fields_synced\x182 \x01(\bR\x11issueFieldsSynced\"\x1e\n" +
+	"\x13issue_fields_synced\x182 \x01(\bR\x11issueFieldsSynced\x12F\n" +
+	"\x11meta_changed_date\x183 \x01(\v2\x1a.google.protobuf.TimestampR\x0fmetaChangedDate\"\x1e\n" +
 	"\n" +
 	"BoolChange\x12\x10\n" +
 	"\x03val\x18\x01 \x01(\bR\x03val\" \n" +
@@ -3643,51 +3658,52 @@ var file_maintner_proto_depIdxs = []int32{
 	32, // 35: maintpb.GithubIssueMutation.project_event:type_name -> maintpb.GithubProjectEvent
 	11, // 36: maintpb.GithubIssueMutation.project_event_status:type_name -> maintpb.GithubIssueSyncStatus
 	31, // 37: maintpb.GithubIssueMutation.issue_field:type_name -> maintpb.GithubIssueFieldValue
-	3,  // 38: maintpb.GithubMilestone.closed:type_name -> maintpb.BoolChange
-	37, // 39: maintpb.GithubIssueEvent.created:type_name -> google.protobuf.Timestamp
-	5,  // 40: maintpb.GithubIssueEvent.label:type_name -> maintpb.GithubLabel
-	6,  // 41: maintpb.GithubIssueEvent.milestone:type_name -> maintpb.GithubMilestone
-	9,  // 42: maintpb.GithubIssueEvent.commit:type_name -> maintpb.GithubCommit
-	15, // 43: maintpb.GithubIssueEvent.team_reviewer:type_name -> maintpb.GithubTeam
-	8,  // 44: maintpb.GithubIssueEvent.dismissed_review:type_name -> maintpb.GithubDismissedReviewEvent
-	37, // 45: maintpb.GithubReview.created:type_name -> google.protobuf.Timestamp
-	37, // 46: maintpb.GithubIssueSyncStatus.server_date:type_name -> google.protobuf.Timestamp
-	13, // 47: maintpb.GithubIssueCommentMutation.user:type_name -> maintpb.GithubUser
-	37, // 48: maintpb.GithubIssueCommentMutation.created:type_name -> google.protobuf.Timestamp
-	37, // 49: maintpb.GithubIssueCommentMutation.updated:type_name -> google.protobuf.Timestamp
-	14, // 50: maintpb.GithubIssueCommentMutation.reaction:type_name -> maintpb.GithubReaction
-	37, // 51: maintpb.GithubReaction.created:type_name -> google.protobuf.Timestamp
-	18, // 52: maintpb.GitMutation.repo:type_name -> maintpb.GitRepo
-	19, // 53: maintpb.GitMutation.commit:type_name -> maintpb.GitCommit
-	24, // 54: maintpb.GitMutation.ref_update:type_name -> maintpb.GitRef
-	22, // 55: maintpb.GitMutation.tag:type_name -> maintpb.GitTag
-	20, // 56: maintpb.GitCommit.diff_tree:type_name -> maintpb.GitDiffTree
-	21, // 57: maintpb.GitDiffTree.file:type_name -> maintpb.GitDiffTreeFile
-	19, // 58: maintpb.GerritMutation.commits:type_name -> maintpb.GitCommit
-	24, // 59: maintpb.GerritMutation.refs:type_name -> maintpb.GitRef
-	26, // 60: maintpb.GithubProjectMutation.status_options:type_name -> maintpb.GithubProjectStatusOption
-	3,  // 61: maintpb.GithubProjectMutation.closed:type_name -> maintpb.BoolChange
-	27, // 62: maintpb.GithubProjectMutation.fields:type_name -> maintpb.GithubProjectField
-	26, // 63: maintpb.GithubProjectField.options:type_name -> maintpb.GithubProjectStatusOption
-	28, // 64: maintpb.GithubProjectField.iterations:type_name -> maintpb.GithubProjectIteration
-	37, // 65: maintpb.GithubIssueProjectItem.updated_at:type_name -> google.protobuf.Timestamp
-	30, // 66: maintpb.GithubIssueProjectItem.field_values:type_name -> maintpb.GithubProjectItemFieldValue
-	37, // 67: maintpb.GithubProjectEvent.created:type_name -> google.protobuf.Timestamp
-	34, // 68: maintpb.GithubActionsMutation.run:type_name -> maintpb.GithubWorkflowRun
-	35, // 69: maintpb.GithubActionsMutation.job:type_name -> maintpb.GithubWorkflowJob
-	37, // 70: maintpb.GithubWorkflowRun.created:type_name -> google.protobuf.Timestamp
-	37, // 71: maintpb.GithubWorkflowRun.updated:type_name -> google.protobuf.Timestamp
-	37, // 72: maintpb.GithubWorkflowRun.run_started:type_name -> google.protobuf.Timestamp
-	37, // 73: maintpb.GithubWorkflowJob.started:type_name -> google.protobuf.Timestamp
-	37, // 74: maintpb.GithubWorkflowJob.completed:type_name -> google.protobuf.Timestamp
-	36, // 75: maintpb.GithubWorkflowJob.step:type_name -> maintpb.GithubWorkflowStep
-	37, // 76: maintpb.GithubWorkflowStep.started:type_name -> google.protobuf.Timestamp
-	37, // 77: maintpb.GithubWorkflowStep.completed:type_name -> google.protobuf.Timestamp
-	78, // [78:78] is the sub-list for method output_type
-	78, // [78:78] is the sub-list for method input_type
-	78, // [78:78] is the sub-list for extension type_name
-	78, // [78:78] is the sub-list for extension extendee
-	0,  // [0:78] is the sub-list for field type_name
+	37, // 38: maintpb.GithubIssueMutation.meta_changed_date:type_name -> google.protobuf.Timestamp
+	3,  // 39: maintpb.GithubMilestone.closed:type_name -> maintpb.BoolChange
+	37, // 40: maintpb.GithubIssueEvent.created:type_name -> google.protobuf.Timestamp
+	5,  // 41: maintpb.GithubIssueEvent.label:type_name -> maintpb.GithubLabel
+	6,  // 42: maintpb.GithubIssueEvent.milestone:type_name -> maintpb.GithubMilestone
+	9,  // 43: maintpb.GithubIssueEvent.commit:type_name -> maintpb.GithubCommit
+	15, // 44: maintpb.GithubIssueEvent.team_reviewer:type_name -> maintpb.GithubTeam
+	8,  // 45: maintpb.GithubIssueEvent.dismissed_review:type_name -> maintpb.GithubDismissedReviewEvent
+	37, // 46: maintpb.GithubReview.created:type_name -> google.protobuf.Timestamp
+	37, // 47: maintpb.GithubIssueSyncStatus.server_date:type_name -> google.protobuf.Timestamp
+	13, // 48: maintpb.GithubIssueCommentMutation.user:type_name -> maintpb.GithubUser
+	37, // 49: maintpb.GithubIssueCommentMutation.created:type_name -> google.protobuf.Timestamp
+	37, // 50: maintpb.GithubIssueCommentMutation.updated:type_name -> google.protobuf.Timestamp
+	14, // 51: maintpb.GithubIssueCommentMutation.reaction:type_name -> maintpb.GithubReaction
+	37, // 52: maintpb.GithubReaction.created:type_name -> google.protobuf.Timestamp
+	18, // 53: maintpb.GitMutation.repo:type_name -> maintpb.GitRepo
+	19, // 54: maintpb.GitMutation.commit:type_name -> maintpb.GitCommit
+	24, // 55: maintpb.GitMutation.ref_update:type_name -> maintpb.GitRef
+	22, // 56: maintpb.GitMutation.tag:type_name -> maintpb.GitTag
+	20, // 57: maintpb.GitCommit.diff_tree:type_name -> maintpb.GitDiffTree
+	21, // 58: maintpb.GitDiffTree.file:type_name -> maintpb.GitDiffTreeFile
+	19, // 59: maintpb.GerritMutation.commits:type_name -> maintpb.GitCommit
+	24, // 60: maintpb.GerritMutation.refs:type_name -> maintpb.GitRef
+	26, // 61: maintpb.GithubProjectMutation.status_options:type_name -> maintpb.GithubProjectStatusOption
+	3,  // 62: maintpb.GithubProjectMutation.closed:type_name -> maintpb.BoolChange
+	27, // 63: maintpb.GithubProjectMutation.fields:type_name -> maintpb.GithubProjectField
+	26, // 64: maintpb.GithubProjectField.options:type_name -> maintpb.GithubProjectStatusOption
+	28, // 65: maintpb.GithubProjectField.iterations:type_name -> maintpb.GithubProjectIteration
+	37, // 66: maintpb.GithubIssueProjectItem.updated_at:type_name -> google.protobuf.Timestamp
+	30, // 67: maintpb.GithubIssueProjectItem.field_values:type_name -> maintpb.GithubProjectItemFieldValue
+	37, // 68: maintpb.GithubProjectEvent.created:type_name -> google.protobuf.Timestamp
+	34, // 69: maintpb.GithubActionsMutation.run:type_name -> maintpb.GithubWorkflowRun
+	35, // 70: maintpb.GithubActionsMutation.job:type_name -> maintpb.GithubWorkflowJob
+	37, // 71: maintpb.GithubWorkflowRun.created:type_name -> google.protobuf.Timestamp
+	37, // 72: maintpb.GithubWorkflowRun.updated:type_name -> google.protobuf.Timestamp
+	37, // 73: maintpb.GithubWorkflowRun.run_started:type_name -> google.protobuf.Timestamp
+	37, // 74: maintpb.GithubWorkflowJob.started:type_name -> google.protobuf.Timestamp
+	37, // 75: maintpb.GithubWorkflowJob.completed:type_name -> google.protobuf.Timestamp
+	36, // 76: maintpb.GithubWorkflowJob.step:type_name -> maintpb.GithubWorkflowStep
+	37, // 77: maintpb.GithubWorkflowStep.started:type_name -> google.protobuf.Timestamp
+	37, // 78: maintpb.GithubWorkflowStep.completed:type_name -> google.protobuf.Timestamp
+	79, // [79:79] is the sub-list for method output_type
+	79, // [79:79] is the sub-list for method input_type
+	79, // [79:79] is the sub-list for extension type_name
+	79, // [79:79] is the sub-list for extension extendee
+	0,  // [0:79] is the sub-list for field type_name
 }
 
 func init() { file_maintner_proto_init() }

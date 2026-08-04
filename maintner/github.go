@@ -387,6 +387,8 @@ type GitHubIssue struct {
 	projectsSyncedAsOf      time.Time
 	projectEventsSyncedAsOf time.Time
 
+	issueFieldEvents []*GitHubIssueFieldEvent // sorted by Created; deduped by ID on the write path
+
 	// metaChangedAt is the observation time at which a snapshot-style metadata
 	// change (org-level IssueFields or IssueType) was last detected. GitHub
 	// gives no authoritative change time for these and they don't bump Updated,
@@ -398,7 +400,8 @@ type GitHubIssue struct {
 
 	// IssueFields holds GitHub's org-level "Issue fields" (a distinct feature
 	// from Projects V2 fields) by field name -> display value. nil if the issue
-	// has no fields set (or they have not been synced yet).
+	// has no fields set (or they have not been synced yet). This is the current
+	// state only; see ForeachIssueFieldEvent for how the values got there.
 	IssueFields map[string]string
 }
 
@@ -661,6 +664,20 @@ type GitHubProjectEvent struct {
 	Status         string // for "status_changed"
 }
 
+// GitHubIssueFieldEvent is a change to one of the issue's org-level "Issue
+// field" values: the field being set, changed, or cleared. Unlike the
+// IssueFields map (the current state), these are immutable history, so the
+// value a field held during any past interval can be reconstructed from them.
+type GitHubIssueFieldEvent struct {
+	ID            string
+	Type          string // "added", "changed", "removed"
+	FieldName     string
+	PreviousValue string // empty for "added"
+	Value         string // empty for "removed"
+	Actor         *GitHubUser
+	Created       time.Time
+}
+
 // ProjectStatusName returns the display name of this issue's status in the
 // given project, or "" if the issue is not in the project or has no status.
 func (gi *GitHubIssue) ProjectStatusName(proj *GitHubProject) string {
@@ -765,6 +782,17 @@ func (gi *GitHubIssue) ForeachProjectEvent(fn func(*GitHubProjectEvent) error) e
 		return a.Created.Compare(b.Created)
 	})
 	for _, ev := range events {
+		if err := fn(ev); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ForeachIssueFieldEvent calls fn for each change to one of the issue's
+// org-level issue field values, oldest first.
+func (gi *GitHubIssue) ForeachIssueFieldEvent(fn func(*GitHubIssueFieldEvent) error) error {
+	for _, ev := range gi.issueFieldEvents {
 		if err := fn(ev); err != nil {
 			return err
 		}
@@ -2340,6 +2368,40 @@ func (c *Corpus) processGithubIssueMutation(m *maintpb.GithubIssueMutation) {
 	}
 	if m.ProjectEventStatus != nil && m.ProjectEventStatus.ServerDate != nil {
 		gi.projectEventsSyncedAsOf = m.ProjectEventStatus.ServerDate.AsTime().UTC()
+	}
+
+	// Accumulated as history, not replaced wholesale the way the IssueFields
+	// snapshot above is. The GraphQL selection is first:100 and never paginated,
+	// so there are at most 100 of these per issue and the linear dedup scan is
+	// cheaper than a map that only ForeachIssueFieldEvent would ever read back.
+	for _, fe := range m.IssueFieldEvent {
+		if fe.Id == "" {
+			continue
+		}
+		if slices.ContainsFunc(gi.issueFieldEvents, func(have *GitHubIssueFieldEvent) bool {
+			return have.ID == fe.Id
+		}) {
+			continue
+		}
+		ev := &GitHubIssueFieldEvent{
+			ID:            fe.Id,
+			Type:          c.str(fe.EventType),
+			FieldName:     c.str(fe.FieldName),
+			PreviousValue: c.str(fe.PreviousValue),
+			Value:         c.str(fe.Value),
+		}
+		if fe.ActorId != 0 {
+			ev.Actor = c.github.getOrCreateUserID(fe.ActorId)
+		}
+		if fe.Created != nil {
+			ev.Created = fe.Created.AsTime()
+		}
+		// Keep sorted for ForeachIssueFieldEvent. GitHub delivers these
+		// oldest-first, so this is almost always an append.
+		i, _ := slices.BinarySearchFunc(gi.issueFieldEvents, ev.Created, func(have *GitHubIssueFieldEvent, t time.Time) int {
+			return have.Created.Compare(t)
+		})
+		gi.issueFieldEvents = slices.Insert(gi.issueFieldEvents, i, ev)
 	}
 }
 
@@ -5157,7 +5219,50 @@ func (p *githubRepoPoller) syncProjectsForIssue(ctx context.Context, issueNum in
 		}
 	}
 
-	if len(mut.ProjectItem) == 0 && len(mut.RemovedProjectItemId) == 0 && len(mut.ProjectEvent) == 0 && mut.IssueType == "" && !mut.IssueFieldsSynced {
+	// Issue field change events, skipping any the corpus already has. Unlike the
+	// truncated-snapshot case above, a partial history is still usable, so keep
+	// what arrived; GitHub orders oldest-first and this selection is never
+	// paginated, so the overflow is lost rather than deferred. Observed maximum
+	// is 10 of 100.
+	if issueData.IssueFieldEvents.PageInfo.HasNextPage {
+		p.c.logf("maintner: %s/%s#%d has more than %d issue field events; only the oldest are synced", owner, repo, issueNum, len(issueData.IssueFieldEvents.Nodes))
+	}
+	for _, ev := range issueData.IssueFieldEvents.Nodes {
+		if ev.ID == "" || ev.IssueField.Name == "" {
+			continue
+		}
+
+		p.c.mu.RLock()
+		exists := slices.ContainsFunc(gi.issueFieldEvents, func(have *GitHubIssueFieldEvent) bool {
+			return have.ID == ev.ID
+		})
+		p.c.mu.RUnlock()
+		if exists {
+			continue
+		}
+
+		fe := &maintpb.GithubIssueFieldEvent{
+			Id:            ev.ID,
+			EventType:     ev.TypeName.eventType(),
+			FieldName:     ev.IssueField.Name,
+			PreviousValue: ev.PreviousValue,
+			Value:         ev.NewValue,
+		}
+		// A removed event reports no new value; its options carry the old one.
+		if len(ev.Options) > 0 && fe.PreviousValue == "" && fe.Value == "" {
+			fe.PreviousValue = ev.Options[0].Name
+		}
+		if ev.Actor.DatabaseID != 0 {
+			fe.ActorId = ev.Actor.DatabaseID
+		}
+		if !ev.CreatedAt.IsZero() {
+			fe.Created = timestamppb.New(ev.CreatedAt)
+		}
+		mut.IssueFieldEvent = append(mut.IssueFieldEvent, fe)
+	}
+
+	if len(mut.ProjectItem) == 0 && len(mut.RemovedProjectItemId) == 0 && len(mut.ProjectEvent) == 0 &&
+		mut.IssueType == "" && !mut.IssueFieldsSynced && len(mut.IssueFieldEvent) == 0 {
 		return nil // nothing changed
 	}
 
@@ -5334,6 +5439,12 @@ type projectIssueData struct {
 		} `json:"pageInfo"`
 		Nodes []gqlIssueFieldValue `json:"nodes"`
 	} `json:"issueFieldValues"`
+	IssueFieldEvents struct {
+		PageInfo struct {
+			HasNextPage bool `json:"hasNextPage"`
+		} `json:"pageInfo"`
+		Nodes []gqlIssueFieldEvent `json:"nodes"`
+	} `json:"issueFieldEvents"`
 }
 
 // gqlIssueFieldValue is one org-level issue field value node. The field name is
@@ -5347,6 +5458,42 @@ type gqlIssueFieldValue struct {
 	} `json:"field"`
 	Value       string   `json:"value"`       // single-select/text/date/multi-select display value
 	NumberValue *float64 `json:"numberValue"` // number fields
+}
+
+// gqlIssueFieldEvent is one org-level issue-field change event, flattened from
+// the union of the three event types. Which value fields are populated depends
+// on __typename: added sets NewValue, changed sets PreviousValue and NewValue,
+// removed sets Options. See issueFieldEventsFragment.
+type gqlIssueFieldEvent struct {
+	ID         string            `json:"id"`
+	TypeName   gqlFieldEventType `json:"__typename"`
+	CreatedAt  time.Time         `json:"createdAt"`
+	Actor      gqlActor          `json:"actor"`
+	IssueField struct {
+		Name string `json:"name"`
+	} `json:"issueField"`
+	PreviousValue string `json:"previousValue"`
+	NewValue      string `json:"newValue"`
+	Options       []struct {
+		Name string `json:"name"`
+	} `json:"options"`
+}
+
+// gqlFieldEventType maps the GraphQL __typename of an issue-field timeline
+// event to the short event type stored in the corpus.
+type gqlFieldEventType string
+
+func (t gqlFieldEventType) eventType() string {
+	switch t {
+	case "IssueFieldAddedEvent":
+		return "added"
+	case "IssueFieldChangedEvent":
+		return "changed"
+	case "IssueFieldRemovedEvent":
+		return "removed"
+	default:
+		return string(t)
+	}
 }
 
 type gqlProjectItem struct {
@@ -5571,13 +5718,56 @@ const issueFieldValuesFragment = `
         }
 `
 
+// issueFieldEventsFragment fetches the history behind issueFieldValuesFragment:
+// the timeline events recording each issue-field value being set, changed, or
+// cleared. Like the values, the field name comes through an interface fragment
+// (IssueFieldCommon) rather than off the union directly.
+//
+// This is a second timelineItems selection alongside the project-event one in
+// projectItemsFragment, hence the alias; the itemTypes are disjoint and both
+// together leave the query at a rate-limit cost of 1.
+//
+// An added event spells the resulting value "value" while a changed event spells
+// it "newValue"; aliasing the former unifies them. A removed event has neither,
+// but its options list holds the value that was cleared.
+const issueFieldEventsFragment = `
+        issueFieldEvents: timelineItems(
+          first: 100
+          itemTypes: [
+            ISSUE_FIELD_ADDED_EVENT
+            ISSUE_FIELD_CHANGED_EVENT
+            ISSUE_FIELD_REMOVED_EVENT
+          ]
+        ) {
+          pageInfo { hasNextPage }
+          nodes {
+            __typename
+            ... on IssueFieldAddedEvent {
+              id createdAt newValue: value
+              actor { ... on User { databaseId login } }
+              issueField { ... on IssueFieldCommon { name } }
+            }
+            ... on IssueFieldChangedEvent {
+              id createdAt previousValue newValue
+              actor { ... on User { databaseId login } }
+              issueField { ... on IssueFieldCommon { name } }
+            }
+            ... on IssueFieldRemovedEvent {
+              id createdAt options { name }
+              actor { ... on User { databaseId login } }
+              issueField { ... on IssueFieldCommon { name } }
+            }
+          }
+        }
+`
+
 var projectsForIssueQuery = `
 query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     issueOrPullRequest(number: $number) {
       ... on Issue {
         issueType { name }
-` + issueFieldValuesFragment + projectItemsFragment + `
+` + issueFieldValuesFragment + issueFieldEventsFragment + projectItemsFragment + `
       }
       ... on PullRequest {
 ` + projectItemsFragment + `

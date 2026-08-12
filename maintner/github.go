@@ -284,6 +284,41 @@ func (pr *GitHubIssue) ForeachReview(fn func(*GitHubReview) error) error {
 	return nil
 }
 
+// ForeachReviewComment calls fn for each review (line) comment on the
+// pull request's diff, i.e. the comments from GitHub's
+// pulls/{number}/comments API, as opposed to the top-level conversation
+// comments (see ForeachComment) or review summaries (see ForeachReview).
+//
+// If the issue is not a pull request, it returns early with no error.
+//
+// If fn returns an error, iteration ends and ForeachReviewComment returns
+// with that error.
+//
+// The fn function is called serially, in order of the comment's creation
+// time (ties broken by comment ID).
+func (pr *GitHubIssue) ForeachReviewComment(fn func(*GitHubReviewComment) error) error {
+	if !pr.IsPullRequest() {
+		return nil
+	}
+	s := make([]*GitHubReviewComment, 0, len(pr.reviewComments))
+	for _, rc := range pr.reviewComments {
+		s = append(s, rc)
+	}
+	sort.Slice(s, func(i, j int) bool {
+		ci, cj := s[i].Created, s[j].Created
+		if ci.Before(cj) {
+			return true
+		}
+		return ci.Equal(cj) && s[i].ID < s[j].ID
+	})
+	for _, rc := range s {
+		if err := fn(rc); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (g *GitHubRepo) getOrCreateMilestone(id int64) *GitHubMilestone {
 	if id == 0 {
 		panic("zero id")
@@ -370,17 +405,20 @@ type GitHubIssue struct {
 	Milestone   *GitHubMilestone       // nil for unknown, noMilestone for none
 	Labels      map[int64]*GitHubLabel // label ID => label
 
-	commentsUpdatedTil  time.Time                   // max comment modtime seen
-	commentsSyncedAsOf  time.Time                   // as of server's Date header
-	comments            map[int64]*GitHubComment    // by comment.ID
-	eventMaxTime        time.Time                   // latest time of any event in events map
-	eventsSyncedAsOf    time.Time                   // as of server's Date header
-	reviewsSyncedAsOf   time.Time                   // as of server's Date header
-	events              map[int64]*GitHubIssueEvent // by event.ID
-	reviews             map[int64]*GitHubReview     // by event.ID
-	reactions           map[int64]*GitHubReaction   // by reaction.ID, on the issue body
-	reactionsSyncedAsOf time.Time                   // as of server's Date header
-	prDetailsSyncedAsOf time.Time                   // as of server's Date header
+	commentsUpdatedTil       time.Time                      // max comment modtime seen
+	commentsSyncedAsOf       time.Time                      // as of server's Date header
+	comments                 map[int64]*GitHubComment       // by comment.ID
+	eventMaxTime             time.Time                      // latest time of any event in events map
+	eventsSyncedAsOf         time.Time                      // as of server's Date header
+	reviewsSyncedAsOf        time.Time                      // as of server's Date header
+	events                   map[int64]*GitHubIssueEvent    // by event.ID
+	reviews                  map[int64]*GitHubReview        // by event.ID
+	reviewComments           map[int64]*GitHubReviewComment // by comment ID; PR diff (line) comments
+	reviewCommentsUpdatedTil time.Time                      // max review comment modtime seen
+	reviewCommentsSyncedAsOf time.Time                      // as of server's Date header
+	reactions                map[int64]*GitHubReaction      // by reaction.ID, on the issue body
+	reactionsSyncedAsOf      time.Time                      // as of server's Date header
+	prDetailsSyncedAsOf      time.Time                      // as of server's Date header
 
 	projectItems            map[string]*GitHubIssueProjectItem // project node ID -> item
 	projectEvents           map[string]*GitHubProjectEvent     // event node ID -> event
@@ -778,6 +816,7 @@ func (gi *GitHubIssue) ForeachProjectEvent(fn func(*GitHubProjectEvent) error) e
 //
 //   - Updated: issue text/labels/assignees/milestone/state changes;
 //   - commentsUpdatedTil: comment additions and edits;
+//   - reviewCommentsUpdatedTil: PR review (line) comment additions and edits;
 //   - eventMaxTime: timeline events, reviews, project-board events, and
 //     Projects V2 item field-value/Status changes;
 //   - metaChangedAt: org-level Issue-field and IssueType edits (observation
@@ -797,6 +836,9 @@ func (gi *GitHubIssue) LastModified() time.Time {
 	ret := gi.Updated
 	if gi.commentsUpdatedTil.After(ret) {
 		ret = gi.commentsUpdatedTil
+	}
+	if gi.reviewCommentsUpdatedTil.After(ret) {
+		ret = gi.reviewCommentsUpdatedTil
 	}
 	if gi.eventMaxTime.After(ret) {
 		ret = gi.eventMaxTime
@@ -1131,6 +1173,106 @@ type GitHubComment struct {
 	reactions map[int64]*GitHubReaction // by reaction.ID
 }
 
+// GitHubReviewComment represents a review comment left on a line (or file)
+// of a pull request's diff, from GitHub's pulls/{number}/comments API.
+// These are distinct from both issue comments (GitHubComment, the top-level
+// conversation) and review summaries (GitHubReview).
+// For more details, see https://docs.github.com/rest/pulls/comments
+type GitHubReviewComment struct {
+	ID      int64
+	User    *GitHubUser
+	Created time.Time
+	Updated time.Time
+	Body    string
+
+	ReviewID  int64 // ID of the parent GitHubReview, if any
+	InReplyTo int64 // ID of the review comment this replies to, or 0
+
+	Path             string // file path the comment is on
+	CommitID         string // head SHA the comment is currently positioned against
+	OriginalCommitID string // head SHA the comment was originally left on
+
+	// Diff position. Line/StartLine are against CommitID and are zero when
+	// the comment is outdated; OriginalLine/OriginalStartLine are against
+	// OriginalCommitID. StartLine/StartSide are only set for multi-line
+	// comments (the range is StartLine..Line).
+	Line              int64
+	OriginalLine      int64
+	StartLine         int64
+	OriginalStartLine int64
+	Side              string // "LEFT" or "RIGHT"
+	StartSide         string
+
+	DiffHunk         string // the diff hunk the comment applies to
+	SubjectType      string // "line" or "file"
+	ActorAssociation string // e.g. "MEMBER", "CONTRIBUTOR"
+}
+
+// Proto converts GitHubReviewComment to a protobuf.
+func (rc *GitHubReviewComment) Proto() *maintpb.GithubReviewComment {
+	p := &maintpb.GithubReviewComment{
+		Id:                rc.ID,
+		Body:              rc.Body,
+		ReviewId:          rc.ReviewID,
+		InReplyTo:         rc.InReplyTo,
+		Path:              rc.Path,
+		CommitId:          rc.CommitID,
+		OriginalCommitId:  rc.OriginalCommitID,
+		Line:              rc.Line,
+		OriginalLine:      rc.OriginalLine,
+		StartLine:         rc.StartLine,
+		OriginalStartLine: rc.OriginalStartLine,
+		Side:              rc.Side,
+		StartSide:         rc.StartSide,
+		DiffHunk:          rc.DiffHunk,
+		SubjectType:       rc.SubjectType,
+		ActorAssociation:  rc.ActorAssociation,
+	}
+	if rc.User != nil {
+		p.User = &maintpb.GithubUser{Id: rc.User.ID, Login: rc.User.Login}
+	}
+	if !rc.Created.IsZero() {
+		p.Created = timestamppb.New(rc.Created)
+	}
+	if !rc.Updated.IsZero() {
+		p.Updated = timestamppb.New(rc.Updated)
+	}
+	return p
+}
+
+// newGithubReviewComment constructs a GitHubReviewComment from the proto
+// snapshot p.
+// r.github.c.mu must be held.
+func (r *GitHubRepo) newGithubReviewComment(p *maintpb.GithubReviewComment) *GitHubReviewComment {
+	g := r.github
+	rc := &GitHubReviewComment{
+		ID:                p.Id,
+		User:              g.getUser(p.User),
+		Body:              p.Body,
+		ReviewID:          p.ReviewId,
+		InReplyTo:         p.InReplyTo,
+		Path:              p.Path,
+		CommitID:          p.CommitId,
+		OriginalCommitID:  p.OriginalCommitId,
+		Line:              p.Line,
+		OriginalLine:      p.OriginalLine,
+		StartLine:         p.StartLine,
+		OriginalStartLine: p.OriginalStartLine,
+		Side:              p.Side,
+		StartSide:         p.StartSide,
+		DiffHunk:          p.DiffHunk,
+		SubjectType:       p.SubjectType,
+		ActorAssociation:  p.ActorAssociation,
+	}
+	if p.Created != nil {
+		rc.Created = p.Created.AsTime().UTC()
+	}
+	if p.Updated != nil {
+		rc.Updated = p.Updated.AsTime().UTC()
+	}
+	return rc
+}
+
 // GitHubReaction represents an emoji reaction on an issue or comment.
 type GitHubReaction struct {
 	ID      int64
@@ -1377,6 +1519,16 @@ func (gi *GitHubIssue) reviewsSynced() bool {
 	return gi.reviewsSyncedAsOf.After(gi.Updated)
 }
 
+// (requires corpus be locked for reads)
+func (gi *GitHubIssue) reviewCommentsSynced() bool {
+	if gi.NotExist {
+		// Issue doesn't exist, so can't sync its non-issues,
+		// so consider it done.
+		return true
+	}
+	return gi.reviewCommentsSyncedAsOf.After(gi.Updated)
+}
+
 func (c *Corpus) initGithub() {
 	if c.github != nil {
 		return
@@ -1452,13 +1604,14 @@ type watchedGithubRepo struct {
 // except Actions). Use DefaultGitHubSyncFilter to get a filter with
 // the current defaults, then customize it.
 type GitHubSyncFilter struct {
-	Issues    bool // issues + PRs (the issue metadata itself)
-	Comments  bool // issue/PR comments
-	Events    bool // issue timeline events
-	Reviews   bool // PR reviews
-	PRDetails bool // PR merge/branch metadata
-	Reactions bool // emoji reactions
-	Actions   bool // workflow runs and jobs
+	Issues         bool // issues + PRs (the issue metadata itself)
+	Comments       bool // issue/PR comments
+	Events         bool // issue timeline events
+	Reviews        bool // PR reviews
+	ReviewComments bool // PR review (line) comments on the diff
+	PRDetails      bool // PR merge/branch metadata
+	Reactions      bool // emoji reactions
+	Actions        bool // workflow runs and jobs
 
 	// ActionsSince, if non-zero, overrides the Actions sync start time
 	// instead of deriving it from the corpus. Useful for backfilling gaps.
@@ -1476,13 +1629,14 @@ type GitHubSyncFilter struct {
 // behavior: everything enabled except Actions.
 func DefaultGitHubSyncFilter() *GitHubSyncFilter {
 	return &GitHubSyncFilter{
-		Issues:    true,
-		Comments:  true,
-		Events:    true,
-		Reviews:   true,
-		PRDetails: true,
-		Reactions: true,
-		Actions:   false,
+		Issues:         true,
+		Comments:       true,
+		Events:         true,
+		Reviews:        true,
+		ReviewComments: true,
+		PRDetails:      true,
+		Reactions:      true,
+		Actions:        false,
 	}
 }
 
@@ -2217,6 +2371,32 @@ func (c *Corpus) processGithubIssueMutation(m *maintpb.GithubIssueMutation) {
 		gi.reviewsSyncedAsOf = m.ReviewStatus.ServerDate.AsTime().UTC()
 	}
 
+	for _, rcmut := range m.ReviewComment {
+		if rcmut.Id == 0 {
+			c.logf("Ignoring bogus review comment mutation lacking Id: %v", rcmut)
+			continue
+		}
+		if gi.reviewComments == nil {
+			gi.reviewComments = make(map[int64]*GitHubReviewComment)
+		}
+		// Each mutation is a full snapshot of the comment's state;
+		// replace any previously-known copy wholesale.
+		rc := gr.newGithubReviewComment(rcmut)
+		gi.reviewComments[rc.ID] = rc
+		// Track the high-water mark of review comment activity, both to
+		// feed LastModified and to serve as the incremental "since" cursor
+		// for review comment syncing (see syncReviewCommentsOnPullRequest).
+		if rc.Created.After(gi.reviewCommentsUpdatedTil) {
+			gi.reviewCommentsUpdatedTil = rc.Created
+		}
+		if rc.Updated.After(gi.reviewCommentsUpdatedTil) {
+			gi.reviewCommentsUpdatedTil = rc.Updated
+		}
+	}
+	if m.ReviewCommentStatus != nil && m.ReviewCommentStatus.ServerDate != nil {
+		gi.reviewCommentsSyncedAsOf = m.ReviewCommentStatus.ServerDate.AsTime().UTC()
+	}
+
 	for _, rmut := range m.Reaction {
 		if rmut.Id == 0 {
 			continue
@@ -2605,6 +2785,11 @@ func (p *githubRepoPoller) sync(ctx context.Context, expectChanges bool) error {
 	}
 	if f.Reviews {
 		if err := p.syncReviews(ctx); err != nil {
+			return err
+		}
+	}
+	if f.ReviewComments {
+		if err := p.syncReviewComments(ctx); err != nil {
 			return err
 		}
 	}
@@ -4629,6 +4814,160 @@ func (p *githubRepoPoller) syncReviewsOnPullRequest(ctx context.Context, issueNu
 		return err
 	}
 	p.c.addMutation(mut)
+	return nil
+}
+
+func (p *githubRepoPoller) issueNumbersWithStaleReviewCommentsSync() (issueNums []int32) {
+	p.c.mu.RLock()
+	defer p.c.mu.RUnlock()
+
+	for n, gi := range p.gr.issues {
+		if gi.IsPullRequest() && !gi.reviewCommentsSynced() {
+			issueNums = append(issueNums, n)
+		}
+	}
+	slices.Sort(issueNums)
+	return issueNums
+}
+
+// syncReviewComments syncs the review (line) comments on pull request
+// diffs, i.e. GitHub's pulls/{number}/comments API. These are distinct
+// from both issue comments (syncComments) and review summaries
+// (syncReviews).
+func (p *githubRepoPoller) syncReviewComments(ctx context.Context) error {
+	for {
+		nums := p.issueNumbersWithStaleReviewCommentsSync()
+		if len(nums) == 0 {
+			return nil
+		}
+		remain := len(nums)
+		for _, num := range nums {
+			p.logf("review comments sync: %d PRs remaining; syncing PR %v", remain, num)
+			if err := p.syncReviewCommentsOnPullRequest(ctx, num); err != nil {
+				p.logf("review comments sync on PR %d: %v", num, err)
+				return err
+			}
+			remain--
+		}
+	}
+}
+
+// syncReviewCommentsOnPullRequest syncs the review (line) comments of a
+// single pull request. Like syncCommentsOnIssue it walks the comments in
+// updated-time order using the corpus's high-water mark as an incremental
+// cursor, so both new comments and edits to old ones are picked up.
+// Deleted review comments are not detected (same limitation as issue
+// comments).
+func (p *githubRepoPoller) syncReviewCommentsOnPullRequest(ctx context.Context, issueNum int32) error {
+	p.c.mu.RLock()
+	issue := p.gr.issues[issueNum]
+	if issue == nil {
+		p.c.mu.RUnlock()
+		return fmt.Errorf("unknown issue number %v", issueNum)
+	}
+	if !issue.IsPullRequest() {
+		p.c.mu.RUnlock()
+		return nil
+	}
+	since := issue.reviewCommentsUpdatedTil
+	p.c.mu.RUnlock()
+
+	owner, repo := p.gr.id.Owner, p.gr.id.Repo
+	morePages := true // at least try the first. might be empty.
+	for morePages {
+		opt := &github.PullRequestListCommentsOptions{
+			Direction:   "asc",
+			Sort:        "updated",
+			Since:       since,
+			ListOptions: github.ListOptions{PerPage: 100},
+		}
+		pcs, res, err := p.githubDirect.PullRequests.ListComments(ctx, owner, repo, int(issueNum), opt)
+		if canRetry(ctx, err) {
+			continue
+		} else if isIssueGoneError(err) {
+			mut := &maintpb.Mutation{
+				GithubIssue: &maintpb.GithubIssueMutation{
+					Owner:    owner,
+					Repo:     repo,
+					Number:   issueNum,
+					NotExist: true,
+				},
+			}
+			p.logf("PR %d review comments are gone, marking as NotExist", issueNum)
+			p.c.addMutation(mut)
+			return nil
+		} else if err != nil {
+			return err
+		}
+		serverDate, err := http.ParseTime(res.Header.Get("Date"))
+		if err != nil {
+			return fmt.Errorf("invalid server Date response: %v", err)
+		}
+		serverDate = serverDate.UTC()
+		p.logf("Number of review comments on PR %d since %v: %v", issueNum, since, len(pcs))
+
+		mut := &maintpb.Mutation{
+			GithubIssue: &maintpb.GithubIssueMutation{
+				Owner:  owner,
+				Repo:   repo,
+				Number: issueNum,
+			},
+		}
+
+		p.c.mu.RLock()
+		for _, pc := range pcs {
+			if pc.ID == nil || pc.Body == nil || pc.User == nil || pc.CreatedAt == nil || pc.UpdatedAt == nil {
+				// Bogus.
+				p.logf("bogus review comment: %v", pc)
+				continue
+			}
+			since = pc.UpdatedAt.Time // for next round
+
+			id := *pc.ID
+			cur := issue.reviewComments[id]
+			if cur != nil && cur.Updated.Equal(pc.UpdatedAt.Time.UTC()) && cur.Body == *pc.Body {
+				// Already have this version of the comment; skip.
+				continue
+			}
+
+			// Each mutation is a full snapshot of the comment's state.
+			rcmut := &maintpb.GithubReviewComment{
+				Id: id,
+				User: &maintpb.GithubUser{
+					Id:    pc.User.GetID(),
+					Login: pc.User.GetLogin(),
+				},
+				Body:              *pc.Body,
+				Created:           timestamppb.New(pc.CreatedAt.Time),
+				Updated:           timestamppb.New(pc.UpdatedAt.Time),
+				ReviewId:          pc.GetPullRequestReviewID(),
+				InReplyTo:         pc.GetInReplyTo(),
+				Path:              pc.GetPath(),
+				CommitId:          pc.GetCommitID(),
+				OriginalCommitId:  pc.GetOriginalCommitID(),
+				Line:              int64(pc.GetLine()),
+				OriginalLine:      int64(pc.GetOriginalLine()),
+				StartLine:         int64(pc.GetStartLine()),
+				OriginalStartLine: int64(pc.GetOriginalStartLine()),
+				Side:              pc.GetSide(),
+				StartSide:         pc.GetStartSide(),
+				DiffHunk:          pc.GetDiffHunk(),
+				SubjectType:       pc.GetSubjectType(),
+				ActorAssociation:  pc.GetAuthorAssociation(),
+			}
+			mut.GithubIssue.ReviewComment = append(mut.GithubIssue.ReviewComment, rcmut)
+		}
+		p.c.mu.RUnlock()
+
+		if res.NextPage == 0 {
+			mut.GithubIssue.ReviewCommentStatus = &maintpb.GithubIssueSyncStatus{
+				ServerDate: timestamppb.New(serverDate),
+			}
+			morePages = false
+		}
+
+		p.c.addMutation(mut)
+	}
 	return nil
 }
 

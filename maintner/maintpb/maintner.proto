@@ -128,7 +128,13 @@ message GithubIssueMutation {
   // GitHubIssue.LastModified account for them.
   google.protobuf.Timestamp meta_changed_date = 51;
 
-  // Next tag: 52
+  // Review (line) comments on a PR's diff, from GitHub's
+  // pulls/{number}/comments API. Each entry is a full snapshot of the
+  // comment's current state; see GithubReviewComment.
+  repeated GithubReviewComment review_comment = 52;
+  GithubIssueSyncStatus review_comment_status = 53;  // sync cursor for review comments
+
+  // Next tag: 54
 }
 
 // BoolChange represents a change to a boolean value.
@@ -242,6 +248,50 @@ message GithubReview {
   bytes other_json = 8;
 
   // Next tag: 9
+}
+
+// GithubReviewComment is a review comment left on a line (or file) of a
+// pull request's diff, from GitHub's pulls/{number}/comments API. These are
+// distinct from both issue comments (GithubIssueCommentMutation, the
+// top-level conversation) and review summaries (GithubReview).
+//
+// Unlike issue comment mutations, each GithubReviewComment mutation is a
+// full snapshot of the comment's state at sync time: appliers replace any
+// previously-known comment with the same id wholesale. (Review comments are
+// mutable: the body can be edited, and the line/side position fields shift
+// as the PR is updated — including becoming unset when the comment goes
+// outdated — so field-presence-based patching can't represent all changes.)
+message GithubReviewComment {
+  int64 id = 1;  // required
+
+  GithubUser user = 2;
+  string body = 3;
+  google.protobuf.Timestamp created = 4;
+  google.protobuf.Timestamp updated = 5;
+
+  int64 review_id = 6;    // ID of the parent GithubReview (pull_request_review_id)
+  int64 in_reply_to = 7;  // ID of the review comment this replies to, or 0
+
+  string path = 8;                // file path the comment is on
+  string commit_id = 9;           // head SHA the comment is currently positioned against
+  string original_commit_id = 10; // head SHA the comment was originally left on
+
+  // Diff position. line/start_line are against commit_id and are zero when
+  // the comment is outdated; original_line/original_start_line are against
+  // original_commit_id. start_line/start_side are only set for multi-line
+  // comments (the range is start_line..line).
+  int64 line = 11;
+  int64 original_line = 12;
+  int64 start_line = 13;
+  int64 original_start_line = 14;
+  string side = 15;        // "LEFT" or "RIGHT"
+  string start_side = 16;
+
+  string diff_hunk = 17;         // the diff hunk the comment applies to
+  string subject_type = 18;      // "line" or "file"
+  string actor_association = 19; // author_association, e.g. "MEMBER", "CONTRIBUTOR"
+
+  // Next tag: 20
 }
 
 // GithubIssueSyncStatus notes where syncing is at for comments

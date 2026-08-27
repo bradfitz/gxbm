@@ -1390,6 +1390,147 @@ func TestProcessMutation_PullRequest_DraftChange(t *testing.T) {
 	}
 }
 
+func TestProcessMutation_ReviewComments(t *testing.T) {
+	c := new(Corpus)
+
+	// Create a PR issue.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:       "golang",
+			Repo:        "go",
+			Number:      11,
+			PullRequest: true,
+			User:        &maintpb.GithubUser{Id: 1, Login: "author"},
+			Created:     timestamppb.New(t1),
+			Updated:     timestamppb.New(t1),
+		},
+	})
+	gi := c.github.repos[GitHubRepoID{"golang", "go"}].issues[11]
+
+	// Add two review comments (out of chronological order).
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "golang",
+			Repo:   "go",
+			Number: 11,
+			ReviewComment: []*maintpb.GithubReviewComment{
+				{
+					Id:        301,
+					User:      &maintpb.GithubUser{Id: 3, Login: "replier"},
+					Body:      "second",
+					Created:   timestamppb.New(t2),
+					Updated:   timestamppb.New(t2),
+					ReviewId:  900,
+					InReplyTo: 300,
+					Path:      "foo/bar.go",
+				},
+				{
+					Id:               300,
+					User:             &maintpb.GithubUser{Id: 2, Login: "reviewer"},
+					Body:             "first",
+					Created:          timestamppb.New(t1),
+					Updated:          timestamppb.New(t1),
+					ReviewId:         900,
+					Path:             "foo/bar.go",
+					CommitId:         "1111111111111111111111111111111111111111",
+					OriginalCommitId: "1111111111111111111111111111111111111111",
+					Line:             10,
+					OriginalLine:     10,
+					Side:             "RIGHT",
+					DiffHunk:         "@@ -1,3 +1,4 @@",
+					SubjectType:      "line",
+					ActorAssociation: "MEMBER",
+				},
+			},
+		},
+	})
+
+	if len(gi.reviewComments) != 2 {
+		t.Fatalf("got %d review comments; want 2", len(gi.reviewComments))
+	}
+	rc := gi.reviewComments[300]
+	if rc == nil || rc.User == nil || rc.User.Login != "reviewer" ||
+		rc.Body != "first" || rc.Path != "foo/bar.go" || rc.Line != 10 ||
+		rc.Side != "RIGHT" || rc.ReviewID != 900 || rc.SubjectType != "line" ||
+		rc.ActorAssociation != "MEMBER" {
+		t.Errorf("review comment 300 = %+v", rc)
+	}
+	if got := gi.reviewComments[301]; got == nil || got.InReplyTo != 300 {
+		t.Errorf("review comment 301 = %+v; want InReplyTo=300", got)
+	}
+
+	// ForeachReviewComment iterates in creation order.
+	var order []int64
+	gi.ForeachReviewComment(func(rc *GitHubReviewComment) error {
+		order = append(order, rc.ID)
+		return nil
+	})
+	if want := []int64{300, 301}; !reflect.DeepEqual(order, want) {
+		t.Errorf("iteration order = %v; want %v", order, want)
+	}
+
+	// Review comment activity feeds LastModified.
+	if got := gi.LastModified(); !got.Equal(t2) {
+		t.Errorf("LastModified = %v; want %v", got, t2)
+	}
+
+	// A later snapshot of the same comment replaces it wholesale:
+	// the body was edited and the comment went outdated (Line reset to 0).
+	t3 := t2.Add(time.Hour)
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "golang",
+			Repo:   "go",
+			Number: 11,
+			ReviewComment: []*maintpb.GithubReviewComment{{
+				Id:               300,
+				User:             &maintpb.GithubUser{Id: 2, Login: "reviewer"},
+				Body:             "first (edited)",
+				Created:          timestamppb.New(t1),
+				Updated:          timestamppb.New(t3),
+				ReviewId:         900,
+				Path:             "foo/bar.go",
+				OriginalCommitId: "1111111111111111111111111111111111111111",
+				OriginalLine:     10,
+				SubjectType:      "line",
+			}},
+			ReviewCommentStatus: &maintpb.GithubIssueSyncStatus{
+				ServerDate: timestamppb.New(t3),
+			},
+		},
+	})
+
+	rc = gi.reviewComments[300]
+	if rc.Body != "first (edited)" {
+		t.Errorf("Body = %q; want edited body", rc.Body)
+	}
+	if rc.Line != 0 || rc.CommitID != "" || rc.Side != "" {
+		t.Errorf("outdated comment should have Line/CommitID/Side cleared; got %+v", rc)
+	}
+	if rc.OriginalLine != 10 {
+		t.Errorf("OriginalLine = %d; want 10", rc.OriginalLine)
+	}
+	if !gi.reviewCommentsUpdatedTil.Equal(t3) {
+		t.Errorf("reviewCommentsUpdatedTil = %v; want %v", gi.reviewCommentsUpdatedTil, t3)
+	}
+	if !gi.reviewCommentsSyncedAsOf.Equal(t3) {
+		t.Errorf("reviewCommentsSyncedAsOf = %v; want %v", gi.reviewCommentsSyncedAsOf, t3)
+	}
+	if !gi.reviewCommentsSynced() {
+		t.Error("reviewCommentsSynced should be true")
+	}
+	if got := gi.LastModified(); !got.Equal(t3) {
+		t.Errorf("LastModified after edit = %v; want %v", got, t3)
+	}
+
+	// Proto round-trip.
+	gr := c.github.repos[GitHubRepoID{"golang", "go"}]
+	rc2 := gr.newGithubReviewComment(rc.Proto())
+	if !reflect.DeepEqual(rc, rc2) {
+		t.Errorf("proto round-trip differs: %v", DeepDiff(rc, rc2))
+	}
+}
+
 func TestProcessMutation_NonPR_IgnoresPRFields(t *testing.T) {
 	c := new(Corpus)
 
@@ -1569,7 +1710,7 @@ func TestProcessMutation_Actions_JobBeforeRun(t *testing.T) {
 
 func TestDefaultGitHubSyncFilter(t *testing.T) {
 	f := DefaultGitHubSyncFilter()
-	if !f.Issues || !f.Comments || !f.Events || !f.Reviews || !f.PRDetails || !f.Reactions {
+	if !f.Issues || !f.Comments || !f.Events || !f.Reviews || !f.ReviewComments || !f.PRDetails || !f.Reactions {
 		t.Error("default filter should enable all standard sync categories")
 	}
 	if f.Actions {

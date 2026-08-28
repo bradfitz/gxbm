@@ -2352,6 +2352,210 @@ func TestProcessMutation_IssueFields(t *testing.T) {
 	}
 }
 
+func TestProcessMutation_IssueFieldEvents(t *testing.T) {
+	c := new(Corpus)
+
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "tailscale",
+			Repo:   "tailscale",
+			Number: 11,
+			User:   &maintpb.GithubUser{Id: 1},
+		},
+	})
+
+	gi := c.github.repos[GitHubRepoID{"tailscale", "tailscale"}].issues[11]
+
+	// collect returns the issue's field events in ForeachIssueFieldEvent order.
+	collect := func() []*GitHubIssueFieldEvent {
+		var got []*GitHubIssueFieldEvent
+		if err := gi.ForeachIssueFieldEvent(func(ev *GitHubIssueFieldEvent) error {
+			got = append(got, ev)
+			return nil
+		}); err != nil {
+			t.Fatalf("ForeachIssueFieldEvent: %v", err)
+		}
+		return got
+	}
+
+	if got := collect(); len(got) != 0 {
+		t.Errorf("got %d issue field events, want 0", len(got))
+	}
+
+	day := func(d int) *timestamppb.Timestamp {
+		return timestamppb.New(time.Date(2026, 3, d, 12, 0, 0, 0, time.UTC))
+	}
+
+	// Deliberately out of chronological order: the corpus sorts on insert, so
+	// it doesn't require sorted input.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "tailscale",
+			Repo:   "tailscale",
+			Number: 11,
+			IssueFieldEvent: []*maintpb.GithubIssueFieldEvent{
+				{Id: "e2", EventType: "changed", FieldName: "Color", PreviousValue: "Green", Value: "Blue", Created: day(2)},
+				{Id: "e1", EventType: "added", FieldName: "Color", Value: "Green", Created: day(1)},
+			},
+		},
+	})
+
+	got := collect()
+	if len(got) != 2 {
+		t.Fatalf("got %d issue field events, want 2", len(got))
+	}
+	if got[0].ID != "e1" || got[1].ID != "e2" {
+		t.Errorf("event order = %q, %q; want e1, e2 (sorted by Created)", got[0].ID, got[1].ID)
+	}
+	if got[0].Type != "added" || got[0].Value != "Green" || got[0].PreviousValue != "" {
+		t.Errorf("e1 = %+v, want added Color -> Green with no previous value", got[0])
+	}
+	if got[1].Type != "changed" || got[1].PreviousValue != "Green" || got[1].Value != "Blue" {
+		t.Errorf("e2 = %+v, want changed Color Green -> Blue", got[1])
+	}
+
+	// Unlike the IssueFields snapshot, events accumulate: a later mutation adds
+	// to the history rather than replacing it. A repeated ID is not duplicated.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "tailscale",
+			Repo:   "tailscale",
+			Number: 11,
+			IssueFieldEvent: []*maintpb.GithubIssueFieldEvent{
+				{Id: "e2", EventType: "changed", FieldName: "Color", PreviousValue: "Green", Value: "Blue", Created: day(2)},
+				{Id: "e3", EventType: "removed", FieldName: "Color", Created: day(3)},
+			},
+		},
+	})
+
+	got = collect()
+	if len(got) != 3 {
+		t.Fatalf("got %d issue field events, want 3 (events accumulate; e2 not duplicated)", len(got))
+	}
+	if got[2].ID != "e3" || got[2].Type != "removed" || got[2].Value != "" {
+		t.Errorf("e3 = %+v, want removed Color with no value", got[2])
+	}
+
+	// A mutation that doesn't touch field events must not clear the history.
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "tailscale",
+			Repo:   "tailscale",
+			Number: 11,
+		},
+	})
+	if got := collect(); len(got) != 3 {
+		t.Errorf("got %d issue field events after no-op mutation, want 3 (should not be cleared)", len(got))
+	}
+}
+
+// TestSyncProjectsForIssue_MockIssueFieldEvents exercises the issue-field-event
+// decode and emission path with a canned GraphQL response whose shape mirrors a
+// real one (see issueFieldEventsFragment): added and changed events both report
+// the resulting value as newValue, and removed events report only options.
+func TestSyncProjectsForIssue_MockIssueFieldEvents(t *testing.T) {
+	const responseJSON = `{
+  "data": {
+    "repository": {
+      "issueOrPullRequest": {
+        "issueType": null,
+        "issueFieldValues": {
+          "pageInfo": {"hasNextPage": false},
+          "nodes": [
+            {"__typename": "IssueFieldSingleSelectValue", "field": {"name": "Color"}, "value": "Blue"}
+          ]
+        },
+        "issueFieldEvents": {
+          "pageInfo": {"hasNextPage": false},
+          "nodes": [
+            {
+              "__typename": "IssueFieldAddedEvent",
+              "id": "IFAE_1", "createdAt": "2026-03-01T12:00:00Z", "newValue": "Green",
+              "actor": {"databaseId": 7, "login": "someone"},
+              "issueField": {"name": "Color"}
+            },
+            {
+              "__typename": "IssueFieldChangedEvent",
+              "id": "IFCE_2", "createdAt": "2026-03-02T12:00:00Z",
+              "previousValue": "Green", "newValue": "Blue",
+              "actor": {"databaseId": 7, "login": "someone"},
+              "issueField": {"name": "Color"}
+            },
+            {
+              "__typename": "IssueFieldRemovedEvent",
+              "id": "IFRE_3", "createdAt": "2026-03-03T12:00:00Z",
+              "options": [{"name": "Large"}],
+              "actor": {"databaseId": 7, "login": "someone"},
+              "issueField": {"name": "Size"}
+            }
+          ]
+        },
+        "projectItems": {"nodes": []},
+        "timelineItems": {"nodes": []}
+      }
+    }
+  }
+}`
+
+	hc := &http.Client{Transport: &graphqlRoundTripper{body: []byte(responseJSON)}}
+	c := new(Corpus)
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner:  "test",
+			Repo:   "repo",
+			Number: 1,
+			User:   &maintpb.GithubUser{Id: 1},
+		},
+	})
+
+	if err := c.SyncProjectsForIssue(context.Background(), hc, "test", "repo", 1); err != nil {
+		t.Fatalf("SyncProjectsForIssue: %v", err)
+	}
+
+	gi := c.github.repos[GitHubRepoID{"test", "repo"}].issues[1]
+	var got []*GitHubIssueFieldEvent
+	gi.ForeachIssueFieldEvent(func(ev *GitHubIssueFieldEvent) error {
+		got = append(got, ev)
+		return nil
+	})
+	if len(got) != 3 {
+		t.Fatalf("got %d issue field events, want 3", len(got))
+	}
+
+	// __typename must map to the short event type, and each type's value fields
+	// must land in the right place: added and changed share the newValue alias,
+	// and a removed event's cleared value comes from its options list.
+	want := []struct {
+		id, typ, field, prev, val string
+	}{
+		{"IFAE_1", "added", "Color", "", "Green"},
+		{"IFCE_2", "changed", "Color", "Green", "Blue"},
+		{"IFRE_3", "removed", "Size", "Large", ""},
+	}
+	for i, w := range want {
+		g := got[i]
+		if g.ID != w.id || g.Type != w.typ || g.FieldName != w.field ||
+			g.PreviousValue != w.prev || g.Value != w.val {
+			t.Errorf("event %d = {%s %s %s %q->%q}, want {%s %s %s %q->%q}",
+				i, g.ID, g.Type, g.FieldName, g.PreviousValue, g.Value,
+				w.id, w.typ, w.field, w.prev, w.val)
+		}
+		if g.Actor == nil || g.Actor.ID != 7 {
+			t.Errorf("event %d actor = %+v, want id 7", i, g.Actor)
+		}
+	}
+
+	// Re-syncing the same response must leave the history unchanged. (The replay
+	// path dedups by ID too, so this holds even if the emission-side dedup
+	// regresses; that one exists to keep the mutation log from growing.)
+	if err := c.SyncProjectsForIssue(context.Background(), hc, "test", "repo", 1); err != nil {
+		t.Fatalf("second SyncProjectsForIssue: %v", err)
+	}
+	if n := len(gi.issueFieldEvents); n != 3 {
+		t.Errorf("after re-sync got %d events, want 3", n)
+	}
+}
+
 func TestFieldValuesChanged(t *testing.T) {
 	existing := &GitHubIssueProjectItem{
 		fieldValues: map[string]projectFieldValue{
@@ -3044,6 +3248,16 @@ func TestSyncProjectsForIssue(t *testing.T) {
 	for name, val := range gi.IssueFields {
 		t.Logf("  %s = %q", name, val)
 	}
+	t.Logf("issue field events: %d", len(gi.issueFieldEvents))
+	gi.ForeachIssueFieldEvent(func(ev *GitHubIssueFieldEvent) error {
+		actor := ""
+		if ev.Actor != nil {
+			actor = ev.Actor.Login
+		}
+		t.Logf("  %s %s: %q -> %q (%s by %s)",
+			ev.Created.Format(time.RFC3339), ev.FieldName, ev.PreviousValue, ev.Value, ev.Type, actor)
+		return nil
+	})
 	t.Logf("project items: %d", len(gi.projectItems))
 	for projID, item := range gi.projectItems {
 		proj := c.github.projects[projID]

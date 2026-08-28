@@ -128,7 +128,13 @@ message GithubIssueMutation {
   // GitHubIssue.LastModified account for them.
   google.protobuf.Timestamp meta_changed_date = 51;
 
-  // Next tag: 52
+  // issue_field_event records individual changes to the org-level issue fields
+  // above, so past values can be reconstructed rather than only the current
+  // snapshot. Events accumulate: a mutation carries only ones not yet known,
+  // and never implies the absence of others.
+  repeated GithubIssueFieldEvent issue_field_event = 52;
+
+  // Next tag: 53
 }
 
 // BoolChange represents a change to a boolean value.
@@ -454,6 +460,20 @@ message GithubProjectItemFieldValue {
 message GithubIssueFieldValue {
   string field_name = 1;   // the issue field's name
   string value = 2;        // the field's display value
+}
+
+// GithubIssueFieldEvent records one change to an org-level "Issue field" on an
+// issue: the field being set, changed, or cleared. Unlike GithubIssueFieldValue,
+// which is a snapshot of current values, these carry GitHub's own timestamp for
+// when the change happened.
+message GithubIssueFieldEvent {
+  string id = 1;                              // GraphQL node ID
+  string event_type = 2;                      // "added", "changed", "removed"
+  string field_name = 3;                      // the issue field's name
+  string previous_value = 4;                  // display value before; empty for "added"
+  string value = 5;                           // display value after; empty for "removed"
+  int64 actor_id = 6;
+  google.protobuf.Timestamp created = 7;
 }
 
 // GithubProjectEvent is a project-related timeline event on an issue

@@ -653,14 +653,18 @@ type GitHubIssueProjectItem struct {
 }
 
 // GitHubIssueFieldChange is one of the issue's org-level "Issue field" values
-// being replaced by another. The IssueFields map holds only the current values.
-// A change record is what tells you when a value was set and what it replaced.
+// being set, replaced, or cleared. The IssueFields map holds only the current
+// values. A change record is what tells you when a value was set and what it
+// replaced.
 //
-// A field's first assignment and its clearing are separate GitHub event types
-// and are not synced. See issueFieldChangesFragment.
+// Type says which of the three happened, and decides which values are
+// populated. An "added" change has a Value and no PreviousValue, because the
+// field had none. A "removed" change has neither, because GitHub does not
+// report what the field held.
 type GitHubIssueFieldChange struct {
 	ID            string
 	FieldName     string
+	Type          string // "added", "changed", "removed"
 	PreviousValue string
 	Value         string
 	Actor         *GitHubUser
@@ -2336,12 +2340,18 @@ func (c *Corpus) processGithubIssueMutation(m *maintpb.GithubIssueMutation) {
 		for _, fc := range m.IssueFieldChange {
 			ch := &GitHubIssueFieldChange{
 				ID: fc.Id,
-				// Field names and values repeat across every issue, so intern
-				// them. Node IDs are unique, so interning one would only grow
-				// the table.
+				// Field names, values and event types repeat across every
+				// issue, so intern them. Node IDs are unique, so interning one
+				// would only grow the table.
 				FieldName:     c.str(fc.FieldName),
+				Type:          c.str(fc.EventType),
 				PreviousValue: c.str(fc.PreviousValue),
 				Value:         c.str(fc.Value),
+			}
+			if ch.Type == "" {
+				// Written before event_type existed, when only changes were
+				// synced. See GithubIssueFieldChange in maintner.proto.
+				ch.Type = "changed"
 			}
 			if fc.ActorId != 0 {
 				ch.Actor = c.github.getOrCreateUserID(fc.ActorId)
@@ -5223,11 +5233,13 @@ func (p *githubRepoPoller) syncProjectsForIssue(ctx context.Context, issueNum in
 			if ch.ID == "" || ch.IssueField.Name == "" {
 				continue
 			}
+			prev, val := ch.values()
 			fc := &maintpb.GithubIssueFieldChange{
 				Id:            ch.ID,
 				FieldName:     ch.IssueField.Name,
-				PreviousValue: ch.PreviousValue,
-				Value:         ch.NewValue,
+				EventType:     ch.TypeName.eventType(),
+				PreviousValue: prev,
+				Value:         val,
 				ActorId:       ch.Actor.DatabaseID,
 			}
 			if !ch.CreatedAt.IsZero() {
@@ -5461,18 +5473,52 @@ type gqlIssueFieldValue struct {
 	NumberValue *float64 `json:"numberValue"` // number fields
 }
 
-// gqlIssueFieldChange is one ISSUE_FIELD_CHANGED_EVENT timeline node. As with
-// gqlIssueFieldValue, the field name is flattened out of an interface fragment.
-// See issueFieldChangesFragment.
+// gqlIssueFieldChange is one issue-field timeline node: a value added, changed,
+// or removed. As with gqlIssueFieldValue, the field name is flattened out of an
+// interface fragment. See issueFieldChangesFragment.
+//
+// The three event types have different value fields, and only the one matching
+// TypeName is populated. An added event sets Value, a changed event sets
+// PreviousValue and NewValue, and a removed event sets none of them.
 type gqlIssueFieldChange struct {
-	ID         string    `json:"id"`
-	CreatedAt  time.Time `json:"createdAt"`
-	Actor      gqlActor  `json:"actor"`
+	ID         string             `json:"id"`
+	TypeName   gqlIssueFieldEvent `json:"__typename"`
+	CreatedAt  time.Time          `json:"createdAt"`
+	Actor      gqlActor           `json:"actor"`
 	IssueField struct {
 		Name string `json:"name"`
 	} `json:"issueField"`
-	PreviousValue string `json:"previousValue"`
-	NewValue      string `json:"newValue"`
+	Value         string `json:"value"`         // IssueFieldAddedEvent
+	PreviousValue string `json:"previousValue"` // IssueFieldChangedEvent
+	NewValue      string `json:"newValue"`      // IssueFieldChangedEvent
+}
+
+type gqlIssueFieldEvent string
+
+func (t gqlIssueFieldEvent) eventType() string {
+	switch t {
+	case "IssueFieldAddedEvent":
+		return "added"
+	case "IssueFieldChangedEvent":
+		return "changed"
+	case "IssueFieldRemovedEvent":
+		return "removed"
+	default:
+		return string(t)
+	}
+}
+
+// values returns the previous and new display values for the event, picking
+// whichever pair of fields the event type populates.
+func (ch gqlIssueFieldChange) values() (prev, val string) {
+	switch ch.TypeName {
+	case "IssueFieldAddedEvent":
+		return "", ch.Value
+	case "IssueFieldRemovedEvent":
+		return "", ""
+	default:
+		return ch.PreviousValue, ch.NewValue
+	}
 }
 
 type gqlProjectItem struct {
@@ -5706,23 +5752,47 @@ const issueFieldValuesFragment = `
 // selection needs an alias. The two itemTypes lists are disjoint, and the whole
 // query stays at a rate-limit cost of 1.
 //
-// Only ISSUE_FIELD_CHANGED_EVENT is selected. Adding a field value and removing
-// one are separate event types, and together they outnumber the changes by
-// roughly nine to one. Leaving them out keeps most of the traffic and storage out
-// of the corpus. The cost is that a value's first assignment is not dated, and a
-// cleared field looks unchanged.
+// All three event types are selected. Setting a field for the first time and
+// clearing it are separate event types from changing it, and the first
+// assignment is by far the most common of the three. Selecting only the changes
+// left every field's initial value undated, which is usually the timestamp
+// worth having. Adding the other two costs no extra requests, because they
+// arrive through this same connection.
 //
-// first: 100 is GitHub's max page size, and there is no pagination loop here. The
-// most changes seen on a real issue is 4, so hasNextPage should never be true.
+// The removal event carries no value. GitHub reports which field was cleared
+// and when, not what it held.
+//
+// first: 100 is GitHub's max page size, and there is no pagination loop here.
+// The three types share the one page budget, so an issue with more than 100
+// field events gets no history rather than a truncated one. The most seen on a
+// real issue is 6.
 const issueFieldChangesFragment = `
-        issueFieldChanges: timelineItems(first: 100, itemTypes: [ISSUE_FIELD_CHANGED_EVENT]) {
+        issueFieldChanges: timelineItems(first: 100, itemTypes: [
+          ISSUE_FIELD_ADDED_EVENT
+          ISSUE_FIELD_CHANGED_EVENT
+          ISSUE_FIELD_REMOVED_EVENT
+        ]) {
           pageInfo { hasNextPage }
           nodes {
+            __typename
+            ... on IssueFieldAddedEvent {
+              id
+              createdAt
+              value
+              actor { ... on User { databaseId login } }
+              issueField { ... on IssueFieldCommon { name } }
+            }
             ... on IssueFieldChangedEvent {
               id
               createdAt
               previousValue
               newValue
+              actor { ... on User { databaseId login } }
+              issueField { ... on IssueFieldCommon { name } }
+            }
+            ... on IssueFieldRemovedEvent {
+              id
+              createdAt
               actor { ... on User { databaseId login } }
               issueField { ... on IssueFieldCommon { name } }
             }

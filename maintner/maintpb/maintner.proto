@@ -463,12 +463,20 @@ message GithubIssueFieldValue {
   string value = 2;        // the field's display value
 }
 
-// GithubIssueFieldChange records one org-level "Issue field" value being
-// replaced by another. GithubIssueFieldValue holds only the current value. A
+// GithubIssueFieldChange records one org-level "Issue field" value being set,
+// replaced, or cleared. GithubIssueFieldValue holds only the current value. A
 // change record is what tells you when that value was set and what it replaced.
 //
-// A field's first assignment and its clearing are separate GitHub event types
-// and are not recorded here.
+// GitHub reports the three cases as separate timeline event types, which
+// event_type names. Which of previous_value and value is populated follows from
+// it:
+//
+//   "added"    value only; the field had no value before
+//   "changed"  both
+//   "removed"  neither; GitHub does not report what the field held
+//
+// A record written before event_type existed is always a change, so read an
+// empty event_type as "changed".
 message GithubIssueFieldChange {
   string id = 1;             // GraphQL node ID
   string field_name = 2;     // the issue field's name
@@ -476,6 +484,7 @@ message GithubIssueFieldChange {
   string value = 4;          // display value after the change
   int64 actor_id = 5;
   google.protobuf.Timestamp created = 6;
+  string event_type = 7;     // "added", "changed", "removed"
 }
 
 // GithubProjectEvent is a project-related timeline event on an issue

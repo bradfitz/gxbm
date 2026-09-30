@@ -2747,12 +2747,20 @@ func (x *GithubIssueFieldValue) GetValue() string {
 	return ""
 }
 
-// GithubIssueFieldChange records one org-level "Issue field" value being
-// replaced by another. GithubIssueFieldValue holds only the current value. A
+// GithubIssueFieldChange records one org-level "Issue field" value being set,
+// replaced, or cleared. GithubIssueFieldValue holds only the current value. A
 // change record is what tells you when that value was set and what it replaced.
 //
-// A field's first assignment and its clearing are separate GitHub event types
-// and are not recorded here.
+// GitHub reports the three cases as separate timeline event types, which
+// event_type names. Which of previous_value and value is populated follows from
+// it:
+//
+//	"added"    value only; the field had no value before
+//	"changed"  both
+//	"removed"  neither; GitHub does not report what the field held
+//
+// A record written before event_type existed is always a change, so read an
+// empty event_type as "changed".
 type GithubIssueFieldChange struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`                                            // GraphQL node ID
@@ -2761,6 +2769,7 @@ type GithubIssueFieldChange struct {
 	Value         string                 `protobuf:"bytes,4,opt,name=value,proto3" json:"value,omitempty"`                                      // display value after the change
 	ActorId       int64                  `protobuf:"varint,5,opt,name=actor_id,json=actorId,proto3" json:"actor_id,omitempty"`
 	Created       *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=created,proto3" json:"created,omitempty"`
+	EventType     string                 `protobuf:"bytes,7,opt,name=event_type,json=eventType,proto3" json:"event_type,omitempty"` // "added", "changed", "removed"
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2835,6 +2844,13 @@ func (x *GithubIssueFieldChange) GetCreated() *timestamppb.Timestamp {
 		return x.Created
 	}
 	return nil
+}
+
+func (x *GithubIssueFieldChange) GetEventType() string {
+	if x != nil {
+		return x.EventType
+	}
+	return ""
 }
 
 // GithubProjectEvent is a project-related timeline event on an issue
@@ -3612,7 +3628,7 @@ const file_maintner_proto_rawDesc = "" +
 	"\x15GithubIssueFieldValue\x12\x1d\n" +
 	"\n" +
 	"field_name\x18\x01 \x01(\tR\tfieldName\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value\"\xd5\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value\"\xf4\x01\n" +
 	"\x16GithubIssueFieldChange\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1d\n" +
 	"\n" +
@@ -3620,7 +3636,9 @@ const file_maintner_proto_rawDesc = "" +
 	"\x0eprevious_value\x18\x03 \x01(\tR\rpreviousValue\x12\x14\n" +
 	"\x05value\x18\x04 \x01(\tR\x05value\x12\x19\n" +
 	"\bactor_id\x18\x05 \x01(\x03R\aactorId\x124\n" +
-	"\acreated\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\acreated\"\xa2\x02\n" +
+	"\acreated\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\acreated\x12\x1d\n" +
+	"\n" +
+	"event_type\x18\a \x01(\tR\teventType\"\xa2\x02\n" +
 	"\x12GithubProjectEvent\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1d\n" +
 	"\n" +

@@ -2426,8 +2426,8 @@ func TestProcessMutation_IssueFieldChanges(t *testing.T) {
 	}
 
 	sync(
-		&maintpb.GithubIssueFieldChange{Id: "c1", FieldName: "Color", PreviousValue: "Green", Value: "Blue", ActorId: 1, Created: day(1)},
-		&maintpb.GithubIssueFieldChange{Id: "c2", FieldName: "Size", PreviousValue: "Large", Value: "Small", Created: day(2)},
+		&maintpb.GithubIssueFieldChange{Id: "c1", FieldName: "Color", EventType: "changed", PreviousValue: "Green", Value: "Blue", ActorId: 1, Created: day(1)},
+		&maintpb.GithubIssueFieldChange{Id: "c2", FieldName: "Size", EventType: "changed", PreviousValue: "Large", Value: "Small", Created: day(2)},
 	)
 	got := collect()
 	if len(got) != 2 {
@@ -2475,6 +2475,49 @@ func TestProcessMutation_IssueFieldChanges(t *testing.T) {
 	})
 	if got := collect(); len(got) != 1 {
 		t.Errorf("got %d changes after an unrelated mutation, want 1 (not cleared)", len(got))
+	}
+}
+
+// TestProcessMutation_IssueFieldChangeEventTypes checks that replay carries the
+// event type through, and that a record written before the field existed still
+// replays as a change.
+func TestProcessMutation_IssueFieldChangeEventTypes(t *testing.T) {
+	c := new(Corpus)
+	c.processMutationLocked(&maintpb.Mutation{
+		GithubIssue: &maintpb.GithubIssueMutation{
+			Owner: "tailscale", Repo: "tailscale", Number: 12,
+			IssueFieldChangesSynced: true,
+			IssueFieldChange: []*maintpb.GithubIssueFieldChange{
+				{Id: "a1", FieldName: "Color", EventType: "added", Value: "Green"},
+				{Id: "c1", FieldName: "Color", EventType: "changed", PreviousValue: "Green", Value: "Blue"},
+				{Id: "r1", FieldName: "Color", EventType: "removed"},
+				// Written by a build that synced only changes and had no
+				// event_type to set. It is a change, not an unknown.
+				{Id: "old", FieldName: "Size", PreviousValue: "Large", Value: "Small"},
+			},
+		},
+	})
+	gi := c.github.repos[GitHubRepoID{"tailscale", "tailscale"}].issues[12]
+
+	var got []*GitHubIssueFieldChange
+	gi.ForeachIssueFieldChange(func(ch *GitHubIssueFieldChange) error {
+		got = append(got, ch)
+		return nil
+	})
+	want := []struct{ id, typ, prev, val string }{
+		{"a1", "added", "", "Green"},
+		{"c1", "changed", "Green", "Blue"},
+		{"r1", "removed", "", ""},
+		{"old", "changed", "Large", "Small"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d changes, want %d", len(got), len(want))
+	}
+	for i, w := range want {
+		g := got[i]
+		if g.ID != w.id || g.Type != w.typ || g.PreviousValue != w.prev || g.Value != w.val {
+			t.Errorf("change %d = %+v, want %v", i, g, w)
+		}
 	}
 }
 
@@ -3040,20 +3083,37 @@ func TestSyncProjectsForIssue_MockIssueFieldChanges(t *testing.T) {
           "pageInfo": { "hasNextPage": false },
           "nodes": [
             {
-              "id": "IFCE_1",
+              "__typename": "IssueFieldAddedEvent",
+              "id": "IFAE_1",
               "createdAt": "2026-03-01T12:00:00Z",
+              "value": "Green",
+              "actor": {"databaseId": 7, "login": "alice"},
+              "issueField": {"name": "Color"}
+            },
+            {
+              "__typename": "IssueFieldChangedEvent",
+              "id": "IFCE_1",
+              "createdAt": "2026-03-02T12:00:00Z",
               "previousValue": "Green",
               "newValue": "Blue",
               "actor": {"databaseId": 7, "login": "alice"},
               "issueField": {"name": "Color"}
             },
             {
+              "__typename": "IssueFieldChangedEvent",
               "id": "IFCE_2",
-              "createdAt": "2026-03-02T12:00:00Z",
+              "createdAt": "2026-03-03T12:00:00Z",
               "previousValue": "Blue",
               "newValue": "Red",
               "actor": {"databaseId": 7, "login": "alice"},
               "issueField": {"name": "Color"}
+            },
+            {
+              "__typename": "IssueFieldRemovedEvent",
+              "id": "IFRE_1",
+              "createdAt": "2026-03-04T12:00:00Z",
+              "actor": {"databaseId": 7, "login": "alice"},
+              "issueField": {"name": "Size"}
             }
           ]
         },
@@ -3082,16 +3142,22 @@ func TestSyncProjectsForIssue_MockIssueFieldChanges(t *testing.T) {
 		got = append(got, ch)
 		return nil
 	})
-	want := []struct{ id, field, prev, val string }{
-		{"IFCE_1", "Color", "Green", "Blue"},
-		{"IFCE_2", "Color", "Blue", "Red"},
+	// Each event type reports a different pair of values. An added event has
+	// no previous value, and a removed event has neither value, because GitHub
+	// does not say what the field held.
+	want := []struct{ id, field, typ, prev, val string }{
+		{"IFAE_1", "Color", "added", "", "Green"},
+		{"IFCE_1", "Color", "changed", "Green", "Blue"},
+		{"IFCE_2", "Color", "changed", "Blue", "Red"},
+		{"IFRE_1", "Size", "removed", "", ""},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %d changes, want %d", len(got), len(want))
 	}
 	for i, w := range want {
 		g := got[i]
-		if g.ID != w.id || g.FieldName != w.field || g.PreviousValue != w.prev || g.Value != w.val {
+		if g.ID != w.id || g.FieldName != w.field || g.Type != w.typ ||
+			g.PreviousValue != w.prev || g.Value != w.val {
 			t.Errorf("change %d = %+v, want %v", i, g, w)
 		}
 		if g.Actor == nil || g.Actor.ID != 7 {
@@ -3099,7 +3165,7 @@ func TestSyncProjectsForIssue_MockIssueFieldChanges(t *testing.T) {
 		}
 	}
 	if !got[0].Created.Equal(time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)) {
-		t.Errorf("IFCE_1 created = %v, want 2026-03-01T12:00:00Z", got[0].Created)
+		t.Errorf("IFAE_1 created = %v, want 2026-03-01T12:00:00Z", got[0].Created)
 	}
 
 	// Re-syncing the identical response must not emit another mutation. Replay
@@ -3239,8 +3305,8 @@ func TestSyncProjectsForIssue(t *testing.T) {
 		if ch.Actor != nil {
 			actor = ch.Actor.Login
 		}
-		t.Logf("  %s: %s %q -> %q by %s (id %s)",
-			ch.Created.Format(time.RFC3339), ch.FieldName, ch.PreviousValue, ch.Value, actor, ch.ID)
+		t.Logf("  %s: %s %s %q -> %q by %s (id %s)",
+			ch.Created.Format(time.RFC3339), ch.Type, ch.FieldName, ch.PreviousValue, ch.Value, actor, ch.ID)
 		return nil
 	})
 	t.Logf("project items: %d", len(gi.projectItems))

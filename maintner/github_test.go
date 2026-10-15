@@ -7,10 +7,12 @@ package maintner
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -2265,6 +2267,50 @@ func TestProcessMutation_IssueType(t *testing.T) {
 	}
 }
 
+func TestProcessMutation_StateReason(t *testing.T) {
+	c := new(Corpus)
+	mut := func(reason *maintpb.StringChange) *maintpb.Mutation {
+		return &maintpb.Mutation{
+			GithubIssue: &maintpb.GithubIssueMutation{
+				Owner:       "tailscale",
+				Repo:        "tailscale",
+				Number:      10,
+				StateReason: reason,
+			},
+		}
+	}
+
+	c.processMutationLocked(mut(nil))
+	gi := c.github.repos[GitHubRepoID{"tailscale", "tailscale"}].issues[10]
+	if gi.StateReason != "" {
+		t.Errorf("StateReason = %q, want empty", gi.StateReason)
+	}
+
+	// Closed as completed.
+	c.processMutationLocked(mut(&maintpb.StringChange{Val: "completed"}))
+	if gi.StateReason != "completed" {
+		t.Errorf("StateReason = %q, want completed", gi.StateReason)
+	}
+
+	// Reopened.
+	c.processMutationLocked(mut(&maintpb.StringChange{Val: "reopened"}))
+	if gi.StateReason != "reopened" {
+		t.Errorf("StateReason = %q, want reopened", gi.StateReason)
+	}
+
+	// A mutation without the field leaves it alone.
+	c.processMutationLocked(mut(nil))
+	if gi.StateReason != "reopened" {
+		t.Errorf("StateReason = %q, want reopened (should not be cleared)", gi.StateReason)
+	}
+
+	// An empty StringChange clears it.
+	c.processMutationLocked(mut(&maintpb.StringChange{Val: ""}))
+	if gi.StateReason != "" {
+		t.Errorf("StateReason = %q, want empty after StringChange{\"\"}", gi.StateReason)
+	}
+}
+
 func TestProcessMutation_IssueFields(t *testing.T) {
 	c := new(Corpus)
 
@@ -3419,4 +3465,90 @@ func TestGitHubIssue_LastModified(t *testing.T) {
 		}},
 	})
 	wantLM("reaction (excluded)", at(6))
+}
+
+// TestSyncIssues_FullWalk serves two pages: an open issue the corpus already
+// holds unchanged, then a closed issue it has never seen. The default walk
+// stops after the first page. The full walk reaches the second.
+func TestSyncIssues_FullWalk(t *testing.T) {
+	page1 := []*github.Issue{{
+		ID:        github.Int64(1),
+		Number:    github.Int(1),
+		CreatedAt: &github.Timestamp{Time: t1},
+		UpdatedAt: &github.Timestamp{Time: t2},
+		State:     github.String("open"),
+		Title:     github.String("open and unchanged"),
+	}}
+	page2 := []*github.Issue{{
+		ID:          github.Int64(2),
+		Number:      github.Int(2),
+		CreatedAt:   &github.Timestamp{Time: t1},
+		UpdatedAt:   &github.Timestamp{Time: t1},
+		State:       github.String("closed"),
+		StateReason: github.String("duplicate"),
+		Title:       github.String("closed as duplicate"),
+	}}
+
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		rw.Header().Set("Content-Type", "application/json")
+		if req.URL.Path != "/repos/foowner/bar/issues" {
+			// Milestones and labels.
+			rw.Write([]byte("[]"))
+			return
+		}
+		switch req.URL.Query().Get("after") {
+		case "":
+			rw.Header().Set("Link", fmt.Sprintf(`<%s/repos/foowner/bar/issues?after=p2>; rel="next"`, server.URL))
+			json.NewEncoder(rw).Encode(page1)
+		case "p2":
+			json.NewEncoder(rw).Encode(page2)
+		default:
+			rw.Write([]byte("[]"))
+		}
+	}))
+	defer server.Close()
+
+	newPoller := func(filter *GitHubSyncFilter) (*githubRepoPoller, *GitHubRepo) {
+		var c Corpus
+		c.initGithub()
+		c.mutationLogger = &MockLogger{}
+		gr := c.github.getOrCreateRepo("foowner", "bar")
+		// Seed issue 1 from the server's own payload so page 1 is unchanged.
+		mut, _ := gr.newMutationFromIssue(nil, page1[0])
+		c.addMutation(mut)
+		client := github.NewClient(server.Client())
+		client.BaseURL, _ = url.Parse(server.URL + "/")
+		p := &githubRepoPoller{
+			c:                   &c,
+			gr:                  gr,
+			syncFilter:          filter,
+			githubDirect:        client,
+			githubCaching:       client,
+			staleReactionIssues: map[int32]bool{},
+		}
+		return p, gr
+	}
+
+	p, gr := newPoller(nil)
+	if err := p.syncIssues(context.Background(), false); err != nil {
+		t.Fatalf("default walk: %v", err)
+	}
+	if _, ok := gr.issues[2]; ok {
+		t.Errorf("default walk synced issue 2; want the walk to stop after the unchanged page")
+	}
+
+	full := DefaultGitHubSyncFilter()
+	full.IssuesFullWalk = true
+	p, gr = newPoller(full)
+	if err := p.syncIssues(context.Background(), false); err != nil {
+		t.Fatalf("full walk: %v", err)
+	}
+	gi := gr.issues[2]
+	if gi == nil {
+		t.Fatal("full walk did not sync issue 2")
+	}
+	if !gi.Closed || gi.StateReason != "duplicate" {
+		t.Errorf("issue 2: Closed=%v StateReason=%q, want closed as duplicate", gi.Closed, gi.StateReason)
+	}
 }

@@ -190,6 +190,67 @@ func TestNewMutationsFromIssue(t *testing.T) {
 	}
 }
 
+// TestNewMutationsFromIssue_StateReason checks what diffStateReason emits for
+// a new issue with and without a reason, and for a changed or unchanged one.
+func TestNewMutationsFromIssue_StateReason(t *testing.T) {
+	gr := &GitHubRepo{id: GitHubRepoID{"golang", "go"}}
+	closedDup := &github.Issue{
+		Number:      github.Int(5),
+		CreatedAt:   &github.Timestamp{Time: t1},
+		UpdatedAt:   &github.Timestamp{Time: t2},
+		State:       github.String("closed"),
+		StateReason: github.String("duplicate"),
+	}
+	is, _ := gr.newMutationFromIssue(nil, closedDup)
+	want := &maintpb.Mutation{GithubIssue: &maintpb.GithubIssueMutation{
+		Owner:       "golang",
+		Repo:        "go",
+		Number:      5,
+		BodyChange:  &maintpb.StringChange{},
+		Created:     tp1,
+		Updated:     tp2,
+		Assignees:   []*maintpb.GithubUser{},
+		NoMilestone: true,
+		Closed:      &maintpb.BoolChange{Val: true},
+		StateReason: &maintpb.StringChange{Val: "duplicate"},
+	}}
+	if !reflect.DeepEqual(is, want) {
+		t.Errorf("new closed issue mismatch\n got: %v\nwant: %v\ndiff path: %v", spew.Sdump(is), spew.Sdump(want),
+			diffPath(reflect.ValueOf(is), reflect.ValueOf(want)))
+	}
+
+	// New open issue, no reason: no field.
+	openNew := &github.Issue{
+		Number:    github.Int(6),
+		CreatedAt: &github.Timestamp{Time: t1},
+		UpdatedAt: &github.Timestamp{Time: t2},
+		State:     github.String("open"),
+	}
+	is, _ = gr.newMutationFromIssue(nil, openNew)
+	if is.GithubIssue.StateReason != nil {
+		t.Errorf("new open issue: StateReason = %v, want nil", is.GithubIssue.StateReason)
+	}
+
+	// Existing issue: changed reason emits the new value, unchanged emits nothing.
+	existing := &GitHubIssue{Number: 7, Created: t1, Updated: t2, Closed: true, StateReason: "completed", Milestone: noMilestone}
+	is, summary := gr.newMutationFromIssue(existing, &github.Issue{
+		Number:      github.Int(7),
+		State:       github.String("closed"),
+		StateReason: github.String("duplicate"),
+	})
+	if is == nil || is.GithubIssue.GetStateReason().GetVal() != "duplicate" {
+		t.Errorf("reason change: got %v (summary %q), want StateReason duplicate", spew.Sdump(is), summary)
+	}
+	is, _ = gr.newMutationFromIssue(existing, &github.Issue{
+		Number:      github.Int(7),
+		State:       github.String("closed"),
+		StateReason: github.String("completed"),
+	})
+	if is != nil {
+		t.Errorf("unchanged reason: got mutation %v, want nil", spew.Sdump(is))
+	}
+}
+
 func TestNewAssigneesHandlesNil(t *testing.T) {
 	users := []*github.User{
 		&github.User{Login: github.String("foo"), ID: github.Int64(3)},

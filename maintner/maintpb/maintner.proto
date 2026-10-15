@@ -135,7 +135,11 @@ message GithubIssueMutation {
   repeated GithubIssueFieldChange issue_field_change = 52;
   bool issue_field_changes_synced = 53;
 
-  // Next tag: 54
+  // state_reason is GitHub's state_reason: "completed", "not_planned" or
+  // "duplicate" for a closed issue, "reopened" after a reopen.
+  StringChange state_reason = 54;
+
+  // Next tag: 55
 }
 
 // BoolChange represents a change to a boolean value.

@@ -365,6 +365,7 @@ type GitHubIssue struct {
 	Updated     time.Time
 	ClosedAt    time.Time
 	ClosedBy    *GitHubUser // TODO(dmitshur): Implement (see golang.org/issue/28745).
+	StateReason string      // GitHub's state_reason: "completed", "not_planned", "duplicate" or "reopened"; "" for PRs
 	Title       string
 	Body        string
 	Milestone   *GitHubMilestone       // nil for unknown, noMilestone for none
@@ -1503,6 +1504,8 @@ type GitHubSyncFilter struct {
 	// are under 1 hour or no new data is found.
 	// ActionsSince must be set to define the oldest boundary.
 	ActionsBackfillGaps bool
+
+	IssuesFullWalk bool // read every issue page, not just until the first unchanged one; for backfills
 }
 
 // DefaultGitHubSyncFilter returns a filter matching the current default
@@ -1731,6 +1734,7 @@ var issueDiffMethods = []func(githubIssueDiffer, *maintpb.GithubIssueMutation) b
 	githubIssueDiffer.diffMilestone,
 	githubIssueDiffer.diffAssignees,
 	githubIssueDiffer.diffClosedState,
+	githubIssueDiffer.diffStateReason,
 	githubIssueDiffer.diffClosedAt,
 	githubIssueDiffer.diffClosedBy,
 	githubIssueDiffer.diffLockedState,
@@ -1882,6 +1886,20 @@ func (d githubIssueDiffer) diffClosedState(m *maintpb.GithubIssueMutation) bool 
 		return false
 	}
 	m.Closed = &maintpb.BoolChange{Val: bclosed}
+	return true
+}
+
+// diffStateReason emits a StringChange when GitHub's state_reason differs
+// from the in-memory value. A new issue with no reason emits nothing.
+func (d githubIssueDiffer) diffStateReason(m *maintpb.GithubIssueMutation) bool {
+	reason := d.b.GetStateReason()
+	if d.a != nil && d.a.StateReason == reason {
+		return false
+	}
+	if d.a == nil && reason == "" {
+		return false
+	}
+	m.StateReason = &maintpb.StringChange{Val: reason}
 	return true
 }
 
@@ -2039,6 +2057,9 @@ func (c *Corpus) processGithubIssueMutation(m *maintpb.GithubIssueMutation) {
 	}
 	if b := m.Closed; b != nil {
 		gi.Closed = b.Val
+	}
+	if s := m.StateReason; s != nil {
+		gi.StateReason = s.Val
 	}
 	if b := m.Locked; b != nil {
 		gi.Locked = b.Val
@@ -3718,7 +3739,8 @@ func (p *githubRepoPoller) syncIssues(ctx context.Context, expectChanges bool) e
 			p.lastUpdate = time.Now()
 		}
 
-		if changes == 0 {
+		fullWalk := p.filter().IssuesFullWalk
+		if changes == 0 && !fullWalk {
 			p.logf("no changed issues; cached=%v", fromCache)
 			return nil
 		}
@@ -3728,6 +3750,12 @@ func (p *githubRepoPoller) syncIssues(ctx context.Context, expectChanges bool) e
 		p.c.mu.RUnlock()
 		p.logf("After page %d: %v issues, %v changes, %v issues in memory", page, len(issues), changes, num)
 
+		if fullWalk && res.After == "" {
+			// No next cursor means this was the last page. Without
+			// this check the next request would be page one again.
+			p.logf("issues: full walk reached the last page.")
+			return nil
+		}
 		page++
 		after = res.After
 	}
